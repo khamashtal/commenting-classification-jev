@@ -66,6 +66,19 @@ or any other command that writes to the remote. This includes discarding work: t
 edit, edit the file back, and if that is not practical, say so and let Luis decide rather
 than reaching for `git checkout --` or `git reset`.
 
+## Never scrape a page
+
+**Do not fetch an article page, or any other HTML, to extract data from it.** Everything
+this project needs about an article comes from CAPI: the body text, and the Telegraph
+`page-id` that doubles as the Viafoura `container_id` (`metadata.page-id`, surfaced as
+`Article.page_id`). CAPI is the supported source, needs no HTML parsing, and works on
+premium articles — an anonymous page fetch returns **HTTP 402** on most of them, so
+scraping was never a working route, only one that happened to survive on free articles.
+
+`ViafouraMCPClient` therefore refuses a URL outright and takes a page id or container
+UUID. If something seems to need a page, the answer is another CAPI field or another API,
+not a request for the HTML.
+
 ## Layout
 
 - `src/processing/`: the classification pipeline. `workflow.py` orchestrates and renders
@@ -77,6 +90,12 @@ than reaching for `git checkout --` or `git reset`.
   [container_id]`); constants at the top control what it fetches.
 - `src/clients/vf_mcp.py`: Viafoura Comments MCP client (see below). Python API only,
   no CLI; async core plus sync one-shot helpers.
+- `src/clients/jev.py`: TypeSafe/Jev client. Wraps the SDK with the rate limiting the
+  published limits need (token buckets for both 1,200 req/min and 250k tok/s, halving on
+  an observed 429 and recovering on a clean streak), a concurrency bound, a retry policy
+  sized for long runs, and usage/model accounting. `async with JevClient(key) as jev:`
+  then `await jev.ask(state, questions)`. It knows nothing about comments: the battery,
+  the thresholds and the weights stay in `processing/`.
 - `experiment_1.py` (root): TypeSafe experiment (Jev Choice question over persona data).
 - `output/`: JSON dumps written by the harness; disposable.
 - Add new modules under `src/`; import as `from clients.vf_mcp import …`. `pyproject.toml`
@@ -99,9 +118,9 @@ than reaching for `git checkout --` or `git reset`.
   resolves ids through Viafoura's public Live Comments API instead:
   `GET https://livecomments.viafoura.co/v4/livecomments/{section_uuid}?container_id=<id>&limit=0`
   (no auth; 404 for unknown ids) returns `content_container_uuid`. The Telegraph page id
-  (e.g. `A65xRHy7KY6g`) is the Viafoura `container_id`; every article exposes it in a
-  `<meta property="vf:container_id">` tag, which `container_id_from_url` reads. The
-  Telegraph section_uuid is `00000000-0000-4000-8000-010fdf3f0a45`.
+  (e.g. `A65xRHy7KY6g`) is the Viafoura `container_id`, and **CAPI returns it** as
+  `metadata.page-id` — `processing.fetch` reads it there and puts it on `Article.page_id`.
+  The Telegraph section_uuid is `00000000-0000-4000-8000-010fdf3f0a45`.
 - `get_comments` returns `{"more_available", "contents": [...]}` as a flat list, replies
   inline after their parent (top-level when `parent_uuid == content_container_uuid`).
   `limit` (max 100) counts top-level only; paginate with `starting_from` = last top-level

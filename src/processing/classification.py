@@ -17,8 +17,9 @@ from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any
 
-from typesafe_sdk import AsyncTypeSafeClient, SystemOneResponse
+from typesafe_sdk import SystemOneResponse
 
+from clients.jev import JevClient, Spend
 from clients.vf_mcp import Comment
 from processing.fetch import ArticleThread
 from processing.log_config import logger
@@ -113,6 +114,21 @@ class Classification:
         return not self.comment.is_reply
 
     @property
+    def already_actioned(self) -> bool:
+        """An editor has already pinned or picked this one.
+
+        Proposing it again wastes their time, so it is kept out of the proposals. It is
+        still classified: a comment an editor chose by hand is the closest thing to
+        ground truth this pipeline has, and its score is the cheapest available check on
+        whether the questions agree with the people they are meant to imitate.
+
+        `is_top_comment` is deliberately not included. That flag is Viafoura's own
+        algorithmic pick — the tool the brief reports as having promoted sarcasm — not a
+        human decision, so it says nothing about quality.
+        """
+        return self.comment.is_pinned or self.comment.is_picked
+
+    @property
     def stance(self) -> str:
         value = self.answers.get("stance")
         return value["choice"] if isinstance(value, dict) else "unknown"
@@ -203,17 +219,17 @@ def _read_answers(response: SystemOneResponse) -> dict[str, Any]:
 
 async def _classify_one(
     *,
-    client: AsyncTypeSafeClient,
+    client: JevClient,
     record: Classification,
     thread: ArticleThread,
     article_body: str,
     parent_text: dict[str, str],
-    model: str | None,
-    semaphore: asyncio.Semaphore,
-    usage: Counter[str],
-    resolved: set[str],
 ) -> None:
-    """Send one comment's battery and store the answers on ``record``."""
+    """Send one comment's battery and store the answers on ``record``.
+
+    Pacing, retries, concurrency and usage accounting all belong to `JevClient`; what is
+    left here is the part that is about comments.
+    """
     state = build_state(
         headline=thread.article.headline,
         standfirst=thread.article.standfirst,
@@ -221,24 +237,13 @@ async def _classify_one(
         comment_text=record.comment.text,
         parent_text=parent_text.get(record.comment.uuid),
     )
-    async with semaphore:
-        try:
-            response = await client.system_one(
-                state=state,
-                questions=BATTERY,
-                model=model,
-            )
-        except Exception as exc:  # noqa: BLE001 - one bad comment must not kill the run
-            record.error = f"{type(exc).__name__}: {exc}"
-            logger.warning("Jev failed for %s: %s", record.comment.uuid, record.error)
-            return
+    try:
+        response = await client.ask(state, BATTERY)
+    except Exception as exc:  # noqa: BLE001 - one bad comment must not kill the run
+        record.error = f"{type(exc).__name__}: {exc}"
+        logger.warning("Jev failed for %s: %s", record.comment.uuid, record.error)
+        return
     record.answers = _read_answers(response)
-    # The model that actually answered, which is what the report must name when the
-    # request left the version to the API.
-    resolved.add(response.model)
-    usage["input_tokens"] += response.usage.input_tokens or 0
-    usage["output_tokens"] += response.usage.output_tokens or 0
-    usage["requests"] += 1
 
 
 # ----------------------------------------------------------------- verdict and ranking
@@ -317,9 +322,8 @@ class ClassificationResult:
 
     records: list[Classification]
     shares: dict[str, float]
-    usage: dict[str, int]
-    model: str
-    """The model version that answered, read back from the responses, not requested."""
+    spend: Spend
+    """What this run cost and which model version answered, from the client."""
 
     @property
     def shortlist(self) -> list[Classification]:
@@ -337,19 +341,26 @@ class ClassificationResult:
 
     @property
     def estimated_cost_usd(self) -> float:
-        """Jev bills input tokens only, at $0.042 per million."""
-        return self.usage.get("input_tokens", 0) * 0.042 / 1_000_000
+        return self.spend.estimated_cost_usd
+
+    @property
+    def model(self) -> str:
+        """The model version that answered, read back from the responses."""
+        return self.spend.model
 
 
 async def classify_thread(
     *,
-    client: AsyncTypeSafeClient,
+    client: JevClient,
     thread: ArticleThread,
-    model: str | None,
     article_max_words: int,
-    concurrency: int,
 ) -> ClassificationResult:
-    """Run the whole classification stage over one article's comments."""
+    """Run the whole classification stage over one article's comments.
+
+    The client decides how fast the requests go out and how many are in flight, so this
+    fans out with a plain `gather` and measures what the stretch cost afterwards. That is
+    what lets one client serve several articles without their costs running together.
+    """
     article_body = thread.article.capped_body(article_max_words)
     parent_text = thread.parent_text
 
@@ -370,10 +381,7 @@ async def classify_thread(
         len(records) - len(to_classify),
     )
 
-    usage: Counter[str] = Counter()
-    # More than one entry means the alias advanced mid-run; the report then names both.
-    resolved: set[str] = set()
-    semaphore = asyncio.Semaphore(concurrency)
+    before = client.spent()
     await asyncio.gather(
         *(
             _classify_one(
@@ -382,10 +390,6 @@ async def classify_thread(
                 thread=thread,
                 article_body=article_body,
                 parent_text=parent_text,
-                model=model,
-                semaphore=semaphore,
-                usage=usage,
-                resolved=resolved,
             )
             for record in to_classify
         ),
@@ -402,6 +406,5 @@ async def classify_thread(
     return ClassificationResult(
         records=records,
         shares=shares,
-        usage=dict(usage),
-        model=", ".join(sorted(resolved)) or "no successful requests",
+        spend=client.since(before),
     )

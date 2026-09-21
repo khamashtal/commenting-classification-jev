@@ -83,9 +83,24 @@ text**, so there is no markup to strip. Keep the `text` and `heading` blocks, dr
 ## 8. Comments are fetched by container UUID, and ids are resolved through Viafoura's public API
 
 The MCP server's own id-lookup tools are broken (see `lessons-learnt.md`). The client
-resolves a page id or URL through `livecomments.viafoura.co` instead, which needs no
+resolves a page id through `livecomments.viafoura.co` instead, which needs no
 authentication. This is a workaround for a server-side bug and should be revisited if
 Viafoura fix it.
+
+**Amended 2026-09-21: a URL is no longer accepted, and no page is ever fetched.**
+Resolving a URL meant fetching the article page and reading its
+`<meta property="vf:container_id">` tag. That returns **HTTP 402** on premium articles,
+so it only ever worked on free ones — a live run on a Calais story failed this way.
+
+CAPI already returns the same value as `metadata.page-id`, verified end to end:
+`A65vpYj1jg7t` resolves to container `01a0c441-ed84-77ff-a8f7-198cb638dfa2`.
+`Article.page_id` carries it and `fetch_thread` passes it to Viafoura.
+
+The scraping code is **deleted**, not kept as a fallback, and `ViafouraMCPClient` now
+refuses a URL outright — a fallback would have fired silently on exactly the articles
+where it cannot work. Cost: the article and comment fetches no longer run concurrently,
+because the comment lookup needs the id the article fetch returns. See decision 7, which
+made the same call for article text.
 
 ---
 

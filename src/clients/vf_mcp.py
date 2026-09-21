@@ -19,9 +19,11 @@ Configuration (environment variables, ``.env`` is loaded if present):
 - ``VF_SECTION_UUID``                the site's Viafoura section UUID, used by the public
                                      API fallback; discovered automatically if unset
 
-Identifiers: every method takes the article's ``content_container_uuid``, its Viafoura
-``container_id`` (for the Telegraph that is the page id, e.g. ``A65xRHy7KY6g``, which
-the page exposes in its ``vf:container_id`` meta tag) or the article URL.
+Identifiers: every method takes the article's ``content_container_uuid`` or its Viafoura
+``container_id`` (for the Telegraph that is the page id, e.g. ``A65xRHy7KY6g``). A URL is
+**not** accepted: resolving one used to mean fetching the article page and reading its
+``vf:container_id`` meta tag, which is scraping and returns HTTP 402 on every paywalled
+article. CAPI returns the same id as ``metadata.page-id``; see ``processing.fetch``.
 
 Usage::
 
@@ -42,7 +44,6 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import re
 import uuid as _uuid
 from collections.abc import AsyncIterator, Coroutine, Iterable
 from contextlib import AsyncExitStack
@@ -69,16 +70,6 @@ DEFAULT_TOKEN_STORE = Path.home() / ".jev_ai" / "vf_mcp_tokens.json"
 # Viafoura's public Live Comments API. Used only as a fallback to resolve a
 # container_id to its UUID, because the MCP server's lookup tools reject every id.
 DEFAULT_LIVECOMMENTS_URL = "https://livecomments.viafoura.co"
-# The Telegraph page id is exposed to Viafoura through this meta tag on every article.
-_VF_CONTAINER_META_RE = re.compile(
-    r"""<meta\s+(?:property|name)=["']vf:container_id["']\s+content=["']([^"']+)["']""",
-    re.IGNORECASE,
-)
-_PAGE_USER_AGENT = (
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/128 Safari/537.36"
-)
-_PAGE_FETCH_TIMEOUT = 30.0  # seconds, for fetching an article page's HTML
 # The server never actually redirects a browser here; it is only the redirect_uri we
 # register and that the authorize endpoint echoes back with the code attached.
 _REDIRECT_URI = "http://localhost:8765/callback"
@@ -229,38 +220,6 @@ def _text_of(result: CallToolResult) -> str:
 
 def _is_url(value: str) -> bool:
     return value.startswith(("http://", "https://"))
-
-
-def container_id_from_html(html: str) -> str | None:
-    """Read the Viafoura ``container_id`` from an article page's ``vf:container_id`` meta tag."""
-    match = _VF_CONTAINER_META_RE.search(html)
-    return match.group(1).strip() if match else None
-
-
-async def container_id_from_url(
-    url: str,
-    *,
-    http: httpx2.AsyncClient | None = None,
-) -> str:
-    """Fetch an article page and return its Viafoura ``container_id`` (the page id)."""
-    headers = {"User-Agent": _PAGE_USER_AGENT, "Accept": "text/html"}
-    if http is None:
-        async with httpx2.AsyncClient(
-            timeout=_PAGE_FETCH_TIMEOUT,
-            follow_redirects=True,
-            headers=headers,
-        ) as own:
-            response = await own.get(url)
-    else:
-        response = await http.get(url, headers=headers, follow_redirects=True)
-    if response.status_code != 200:
-        raise ViafouraMCPError(
-            f"Could not fetch {url} (HTTP {response.status_code}) to read its container id",
-        )
-    container_id = container_id_from_html(response.text)
-    if not container_id:
-        raise ContainerNotFoundError(f"No vf:container_id meta tag found on {url}")
-    return container_id
 
 
 def _resolve_api_key(explicit: str | None) -> str:
@@ -599,15 +558,23 @@ class ViafouraMCPClient:
         return found
 
     async def _to_container_id(self, container: str) -> str:
-        """Turn an article URL into its container_id; pass anything else through."""
-        if not _is_url(container):
-            return container
-        if container not in self._container_id_cache:
-            self._container_id_cache[container] = await container_id_from_url(
-                container,
-                http=self._public_http,
+        """Pass an id through; refuse a URL.
+
+        Resolving a URL used to mean fetching the article page and reading its
+        ``vf:container_id`` meta tag. That is scraping, it breaks on every paywalled
+        article (HTTP 402), and it is unnecessary: CAPI returns the same id as
+        ``metadata.page-id``. `processing.fetch` reads it from there and passes the id
+        in, so nothing in this project needs the page.
+        """
+        if _is_url(container):
+            msg = (
+                f"{container!r} is a URL. This client does not fetch article pages. "
+                "Resolve the URL to a Telegraph page id first — CAPI returns it as "
+                "`metadata.page-id`, which `processing.fetch.fetch_article` puts on "
+                "`Article.page_id` — and pass that id instead."
             )
-        return self._container_id_cache[container]
+            raise ViafouraMCPError(msg)
+        return container
 
     async def _resolve_via_mcp(self, container_id: str) -> str | None:
         try:
@@ -991,8 +958,6 @@ __all__ = [
     "ViafouraMCPError",
     "build_oauth_provider",
     "comments_to_dicts",
-    "container_id_from_html",
-    "container_id_from_url",
     "fetch_comments",
     "fetch_comments_in_range",
 ]

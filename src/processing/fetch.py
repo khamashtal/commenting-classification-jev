@@ -6,7 +6,6 @@ same functions serve a CLI run and a FastAPI request handler (see the spec, §3.
 
 from __future__ import annotations
 
-import asyncio
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
@@ -34,6 +33,13 @@ class Article:
     headline: str
     standfirst: str
     body: str
+    page_id: str = ""
+    """Telegraph page id, which is also the Viafoura ``container_id``.
+
+    Taken from CAPI. The alternative is scraping the article's ``vf:container_id`` meta
+    tag, which returns HTTP 402 on any premium article — so this is both cheaper and the
+    only route that works behind the paywall.
+    """
 
     @property
     def body_word_count(self) -> int:
@@ -103,6 +109,7 @@ def article_from_ucm(ucm: dict[str, Any], url: str) -> Article:
         standfirst=content.get("standfirst", "") or "",
         # `data` is already plain text; `html-data` is the marked-up twin and is ignored.
         body="\n\n".join(paragraphs),
+        page_id=str(ucm.get("metadata", {}).get("page-id", "") or ""),
     )
 
 
@@ -129,12 +136,17 @@ async def fetch_article(
 async def fetch_comments(
     vf: ViafouraMCPClient,
     article_ref: str,
-    limit: int,
+    limit: int | None,
     ranked_by: RankedBy = "most_liked",
 ) -> list[Comment]:
-    """Fetch the top ``limit`` comments for an article.
+    """Fetch the top ``limit`` comments for an article, or every comment when ``None``.
 
     ``article_ref`` is a URL, a Telegraph page id, or a Viafoura container UUID.
+
+    The two modes return different populations, not just different counts: ``limit=N``
+    gives the top N *top-level* comments ranked by ``ranked_by``, while ``None`` pages
+    the whole thread and includes replies. Replies are classified like any other comment
+    — `standalone` and the parent text in the state exist for exactly that case.
     """
     comments = await vf.get_comments(article_ref, limit=limit, ranked_by=ranked_by)
     logger.info("Fetched %d comments for %s", len(comments), article_ref)
@@ -147,20 +159,37 @@ async def fetch_thread(
     session: aiohttp.ClientSession,
     settings: Settings,
     article_ref: str,
-    limit: int,
+    limit: int | None,
     ranked_by: RankedBy = "most_liked",
 ) -> ArticleThread:
-    """Fetch an article and its comments, concurrently where possible.
+    """Fetch an article and its comments.
 
-    Given a URL, both calls start at once. Given a page id or container UUID, the
-    comments come first because their metadata is what tells us the article URL.
+    Given a URL, the article comes first: CAPI hands back the Telegraph ``page-id``,
+    which is the Viafoura ``container_id``. **No article page is ever fetched.** The
+    earlier route read the ``vf:container_id`` meta tag out of the page HTML, which is
+    scraping and returns HTTP 402 on every premium article; CAPI is the supported source
+    for the same value and works regardless of the paywall.
+
+    The two calls therefore run in sequence rather than concurrently. One CAPI round trip
+    is a small price for a path that works on paywalled articles; the old concurrent
+    version only ever worked on free ones.
+
+    Given a page id or container UUID, the comments come first because their metadata is
+    what tells us the article URL.
     """
     if _is_url(article_ref):
-        article, comments = await asyncio.gather(
-            fetch_article(article_ref, session, settings),
-            fetch_comments(vf, article_ref, limit, ranked_by),
-        )
+        article = await fetch_article(article_ref, session, settings)
+        if not article.page_id:
+            raise ArticleNotFoundError(
+                f"CAPI returned no `metadata.page-id` for {article_ref}, so the "
+                "Viafoura container cannot be resolved. Nothing here falls back to "
+                "reading the article page: that is scraping, and it fails on every "
+                "paywalled article anyway. Pass the page id or container UUID directly.",
+            )
+        comments = await fetch_comments(vf, article.page_id, limit, ranked_by)
+        container_ref = article.page_id
     else:
+        container_ref = article_ref
         comments = await fetch_comments(vf, article_ref, limit, ranked_by)
         if not comments:
             raise ArticleNotFoundError(
@@ -175,7 +204,7 @@ async def fetch_thread(
             )
         article = await fetch_article(url, session, settings)
 
-    container_uuid = await vf.resolve_container_uuid(article_ref)
+    container_uuid = await vf.resolve_container_uuid(container_ref)
     return ArticleThread(
         article=article,
         comments=tuple(comments),

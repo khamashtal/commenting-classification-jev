@@ -1,10 +1,11 @@
 """Orchestrator: fetch an article and its comments, classify them with Jev, write a report.
 
-Run from the project root:
+Run from anywhere in the project (`clients` and `processing` are installed into the
+venv by `uv sync`, so no PYTHONPATH is needed):
 
-    PYTHONPATH=src uv run python src/processing/workflow.py
-    PYTHONPATH=src uv run python src/processing/workflow.py <article URL>
-    PYTHONPATH=src uv run python src/processing/workflow.py <page id or container UUID>
+    uv run python src/processing/workflow.py
+    uv run python src/processing/workflow.py <article URL>
+    uv run python src/processing/workflow.py <page id or container UUID>
 
 Settings and the three long-lived clients are created here and passed down, so nothing in
 `fetch.py` or `classification.py` reaches for a global. Moving this behind FastAPI means
@@ -43,7 +44,7 @@ from processing.settings import Settings, load_settings
 ARTICLE = "https://www.telegraph.co.uk/health-fitness/conditions/ageing/longevity-lessons-britain-can-learn-from-singapore/"
 
 # How many comments to pull before classifying. Keeps a tuning run cheap and fast.
-TOP_N_COMMENTS = 5
+TOP_N_COMMENTS = 50
 # How Viafoura picks that top N: most_liked, most_replied or trending.
 RANKED_BY: RankedBy = "most_liked"
 # Words of article body sent with every comment. The article dominates token cost, and
@@ -53,10 +54,15 @@ ARTICLE_MAX_WORDS = 600
 CONCURRENCY = 10
 # How many comments the report ranks in full.
 SHORTLIST_N = 15
-# Pinned, not jev-latest: thresholds tuned on one version should not silently move.
-MODEL = "jev-1.13.0"
-# Where the report goes.
-OUTPUT_DIR = Path("output")
+# Unpinned: `None` falls through to the SDK client default, `jev-latest`, so model
+# improvements arrive without a code change. The version that actually answered is read
+# back off each response and named in the report, so a run stays identifiable after the
+# fact. Set this to a version string (e.g. "jev-1.13.0") to freeze it — thresholds
+# calibrated against one version can shift when the alias advances.
+MODEL: str | None = None
+# Where the report goes. Anchored to the project root, not the working directory, so
+# the path is the same whether the script is run from the root or from this folder.
+OUTPUT_DIR = Path(__file__).resolve().parents[2] / "output"
 
 
 # ------------------------------------------------------------------------- the pipeline

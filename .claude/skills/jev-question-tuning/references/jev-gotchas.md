@@ -91,8 +91,14 @@ Jev is not fine-tuned and the same weights serve every account. The only levers 
 
 That is why `questions.py` is the file that matters.
 
-## Pinning the version
+## The version is not pinned
 
-`MODEL = "jev-1.13.0"` in `workflow.py`, deliberately not `jev-latest`. An alias moves when
-TypeSafe ship, and thresholds tuned against one version should not shift underneath you.
-When you do upgrade, re-check the thresholds against known comments.
+`MODEL = None` in `workflow.py`, so requests take the SDK default (`jev-latest`) and model
+improvements arrive without a code change. The cost is that an alias moves when TypeSafe
+ship, so thresholds tuned against one version can shift underneath you. Two things follow:
+
+- Every report names the version that actually answered, read back off the responses
+  (`result.model`), so a run can still be traced to a version after the fact.
+- When two runs disagree and you did not change a question, compare that row first before
+  assuming the change is yours. To rule the model out entirely, pin `MODEL` to a version
+  string for the duration of a tuning session, or pass `--model` to `try_question.py`.

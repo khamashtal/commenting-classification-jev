@@ -38,8 +38,8 @@ TOP_N = 5
 RECENT_HOURS = 3
 # Pages of 100 top-level comments for the full fetch; None fetches the whole thread.
 MAX_PAGES: int | None = 3
-# Where the JSON dump goes; None skips writing.
-OUTPUT_DIR: Path | None = Path("output")
+# Where the JSON dump goes, relative to the project root; None skips writing.
+OUTPUT_DIR: Path | None = Path(__file__).resolve().parents[1] / "output"
 
 # Fields worth showing from the container record; the rest is moderation settings.
 _CONTAINER_FIELDS = (

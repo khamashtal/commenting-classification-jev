@@ -56,11 +56,18 @@ means. `on_topic` is the one where a **low** value excludes.
 
 ---
 
-## 6. The model version is pinned, not `jev-latest`
+## 6. The model version is not pinned — reversed 2026-09-21
 
-Thresholds tuned against one version should not silently move when an alias advances.
-`MODEL = "jev-1.13.0"` in `workflow.py`. Change it deliberately, and re-check the
-thresholds when you do.
+Originally `MODEL = "jev-1.13.0"`, on the grounds that thresholds tuned against one
+version should not silently move when an alias advances. **Reversed on Luis's call:**
+`MODEL = None` in `workflow.py`, so requests take the SDK default (`jev-latest`) and the
+POC picks up model improvements without a code change.
+
+The reproducibility the pin was bought for is recovered a different way: `classify_thread`
+reads the resolved version off each response and `ClassificationResult.model` reports it,
+so the report names the model that actually answered rather than the one requested. That
+labels a run after the fact; it does not stop a threshold shifting mid-tuning. If the
+spreadsheet tuning turns into real calibration, pin `MODEL` for the duration of it.
 
 ---
 

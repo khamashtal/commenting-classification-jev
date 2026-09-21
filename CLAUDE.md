@@ -50,22 +50,39 @@ The variables the code expects, documented here so the file never has to be open
 
 Never print, log or commit secret values, and keep `.env` and `~/.jev_ai/` out of git.
 
+## Git: read-only, never write
+
+**Luis is the only one who commits, merges and pushes.** Leave every change in the working
+tree and say what was changed, for Luis to review and commit. Do not offer to commit, and
+do not treat "that's done" or a clean lint run as permission to.
+
+Reading history is fine and encouraged: `git log`, `git show`, `git diff`, `git status`,
+`git blame`, `git ls-files`, `git check-ignore`.
+
+Never run anything that writes — no `commit`, `add`/stage, `push`, `pull`, `fetch`,
+`merge`, `rebase`, `cherry-pick`, `revert`, `reset`, `restore`, `checkout`/`switch`,
+`branch`, `tag`, `stash`, `clean`, `worktree`, `git config`, and no `gh pr create`/`merge`
+or any other command that writes to the remote. This includes discarding work: to undo an
+edit, edit the file back, and if that is not practical, say so and let Luis decide rather
+than reaching for `git checkout --` or `git reset`.
+
 ## Layout
 
 - `src/processing/`: the classification pipeline. `workflow.py` orchestrates and renders
   the Markdown report, `fetch.py` gets article + comments, `questions.py` holds the Jev
   battery (the tuning surface), `classification.py` holds signals, thresholds and weights.
-  Run: `PYTHONPATH=src uv run python src/processing/workflow.py [article]`. The
-  `PYTHONPATH` is required: a script inside `processing/` otherwise cannot import
-  `clients`. Spec: `.claude/comment-classification-spec.md`.
+  Run: `uv run python src/processing/workflow.py [article]`, from any directory in the
+  project. Spec: `.claude/comment-classification-spec.md`.
 - `src/main.py`: manual test harness for the Viafoura client (`uv run python src/main.py
   [container_id]`); constants at the top control what it fetches.
 - `src/clients/vf_mcp.py`: Viafoura Comments MCP client (see below). Python API only,
   no CLI; async core plus sync one-shot helpers.
 - `experiment_1.py` (root): TypeSafe experiment (Jev Choice question over persona data).
 - `output/`: JSON dumps written by the harness; disposable.
-- Add new modules under `src/`; import as `from clients.vf_mcp import …` with `src` on
-  `sys.path` (or `uv run --directory src`).
+- Add new modules under `src/`; import as `from clients.vf_mcp import …`. `pyproject.toml`
+  installs `src/clients` and `src/processing` into the venv as editable packages, so imports
+  resolve regardless of the working directory. A new top-level package under `src/` must be
+  added to `[tool.hatch.build.targets.wheel] packages` and then `uv sync` re-run.
 
 ## Viafoura Comments MCP (verified 2026-09-21)
 

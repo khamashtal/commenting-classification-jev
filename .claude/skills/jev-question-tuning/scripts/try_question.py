@@ -70,7 +70,11 @@ def parse_args() -> argparse.Namespace:
         "--parent",
         help="Parent comment text, when testing a reply (affects `standalone`)",
     )
-    parser.add_argument("--model", default="jev-1.13.0")
+    parser.add_argument(
+        "--model",
+        default=None,
+        help="Pin a Jev version; omitted, this matches the pipeline and uses the default",
+    )
     parser.add_argument(
         "--article-words",
         type=int,
@@ -186,7 +190,9 @@ async def main() -> int:
             print()
 
     cost = total_tokens * 0.042 / 1_000_000
-    print(f"{len(comments)} comment(s), {total_tokens:,} input tokens, about ${cost:.5f}")
+    print(
+        f"{len(comments)} comment(s), {total_tokens:,} input tokens, about ${cost:.5f}"
+    )
     return 0
 
 

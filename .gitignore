@@ -161,4 +161,4 @@ infrastructure/terraform/environments/prod/vars.tfvars
 !/test/
 local*
 *.log
-output/*
+output/

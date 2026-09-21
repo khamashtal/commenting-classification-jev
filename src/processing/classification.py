@@ -208,9 +208,10 @@ async def _classify_one(
     thread: ArticleThread,
     article_body: str,
     parent_text: dict[str, str],
-    model: str,
+    model: str | None,
     semaphore: asyncio.Semaphore,
     usage: Counter[str],
+    resolved: set[str],
 ) -> None:
     """Send one comment's battery and store the answers on ``record``."""
     state = build_state(
@@ -232,6 +233,9 @@ async def _classify_one(
             logger.warning("Jev failed for %s: %s", record.comment.uuid, record.error)
             return
     record.answers = _read_answers(response)
+    # The model that actually answered, which is what the report must name when the
+    # request left the version to the API.
+    resolved.add(response.model)
     usage["input_tokens"] += response.usage.input_tokens or 0
     usage["output_tokens"] += response.usage.output_tokens or 0
     usage["requests"] += 1
@@ -315,6 +319,7 @@ class ClassificationResult:
     shares: dict[str, float]
     usage: dict[str, int]
     model: str
+    """The model version that answered, read back from the responses, not requested."""
 
     @property
     def shortlist(self) -> list[Classification]:
@@ -340,7 +345,7 @@ async def classify_thread(
     *,
     client: AsyncTypeSafeClient,
     thread: ArticleThread,
-    model: str,
+    model: str | None,
     article_max_words: int,
     concurrency: int,
 ) -> ClassificationResult:
@@ -366,6 +371,8 @@ async def classify_thread(
     )
 
     usage: Counter[str] = Counter()
+    # More than one entry means the alias advanced mid-run; the report then names both.
+    resolved: set[str] = set()
     semaphore = asyncio.Semaphore(concurrency)
     await asyncio.gather(
         *(
@@ -378,6 +385,7 @@ async def classify_thread(
                 model=model,
                 semaphore=semaphore,
                 usage=usage,
+                resolved=resolved,
             )
             for record in to_classify
         ),
@@ -395,5 +403,5 @@ async def classify_thread(
         records=records,
         shares=shares,
         usage=dict(usage),
-        model=model,
+        model=", ".join(sorted(resolved)) or "no successful requests",
     )

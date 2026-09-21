@@ -1,0 +1,118 @@
+# RUFF DEFAULTS
+# (These are all the default groups, even if you don’t currently select them)
+# select = [
+#       "F",     # Pyflakes – detects syntax errors and basic mistakes
+#       "E4",    # Pycodestyle errors (part of E group)
+#       "E7",    # Pycodestyle E7xx errors (naming, etc.)
+#       "E9",    # Pycodestyle E9xx errors (syntax)
+# ]
+
+# The target Python version for Ruff to use for linting.
+# This ensures rules are applied correctly based on available syntax/features.
+# Adjust this to match your project's minimum supported Python version.
+target-version = "py312" # Example: py37, py38, py39, py310, py311, py312
+
+# Max line length for the linter. This is distinct from the formatter's line length.
+# If using a formatter like Ruff's or Black, this value should typically match the formatter's.
+line-length = 88 # This is Black's default, and a common choice.
+
+# Exclude external packages, some are already Ruff's defaults but including in list as sometimes the default doesn't seem to work well.
+exclude = [
+    ".bzr",
+    ".direnv",
+    ".eggs",
+    ".git",
+    ".hg",
+    ".mypy_cache",
+    ".nox",
+    ".pants.d",
+    ".ruff_cache",
+    ".svn",
+    ".tox",
+    ".venv",          # Your virtual environment
+    "__pypackages__",
+    "_build",
+    "buck-out",
+    "build",
+    "dist",
+    "node_modules",
+    "venv",           # Another common virtual environment name
+    "site-packages",  # Where pip installs packages
+    "**/*.ipynb",     # Exclude notebooks
+]
+
+# =============================================================================
+# Linter Configuration
+# =============================================================================
+# `select` specifies the rule codes to enable.
+# Ruff groups rules by their original linter source (e.g., F for Pyflakes, E for pycodestyle).
+# For a full list of rules, see: https://docs.astral.sh/ruff/rules/
+
+[lint] # This corresponds to [tool.ruff.lint] in pyproject.toml
+select = [
+    ##################################### Fundamental Rules ############################
+    "E",        # pycodestyle errors (basic PEP 8 violations, e.g., indentation, whitespace)
+    "F",        # Pyflakes (catches common programming errors, e.g., unused imports, undefined names)
+    "B",        # flake8-bugbear (identifies likely bugs and bad design patterns)
+    "I",        # isort (ensures consistent import sorting and grouping)
+    "UP",       # pyupgrade (suggests modern Python syntax for better readability/performance)
+    "W",        # pycodestyle warnings (further PEP 8 adherence, e.g., trailing whitespace)
+
+    ##################################### Advanced Rules ###############################
+    "C4",       # flake8-comprehensions (encourages Pythonic comprehensions over loops)
+    "COM",      # Flake8-commas – trailing/comma issues
+    # "N",        # pep8-naming (enforces PEP 8 naming conventions for variables, functions, classes)
+    "ANN",      # flake8-annotations (enforces type hint usage - significant effort for existing code)
+    # "D",        # pydocstyle (enforces docstring conventions - can be very noisy initially, enable gradually)
+    "YTT",      # Flake8-2020 – checks for Python 2020 best practices
+    "ASYNC",    # Flake8-async – checks async/await usage
+    "FBT",      # Flake8-boolean-trap – potential pitfalls with booleans
+    # "A",        # Flake8-builtins – misuse of Python built-in names
+    "FAST",     # FastAPI – FastAPI-specific linting rules
+    "PERF",     # Perflint – performance-related checks
+    "DTZ",      # Flake8-datetimez – requires timezone-aware datetime objects
+    # "EM",       # Flake8-errmsg – error message style
+    "PT",       # Flake8-pytest-style – pytest best practices
+    "Q",        # Flake8-quotes – enforces quote style consistency
+    # "RSE",      # Flake8-raise – proper raise statement usage
+    "S",        # flake8-bandit (basic security checks - be aware of potential false positives)
+    "ARG",      # Flake8-unused-arguments – flags unused function arguments
+    #"PLR",        # Pylint Refactor rules (includes PLR0917 for too many positional args)
+]
+
+# `ignore` specifies specific rule codes to disable, even if their category is selected.
+# Use this for rules that don't fit your project's specific needs or are overly strict.
+ignore = [
+    "TD",       # flake8-todos (TD)
+    "FIX",      # flake8-fixme (FIX)
+    "E501",     # Pycodestyle - line too long
+    "D1",       # Pydocstyle - missing docstring in public module, class, or function
+    "FBT003",   # Flake8-boolean-trap - boolean position value in function call
+    "D203",     # Pydocstyle - one blank line required before class docstring
+    "D212",     # Pydocstyle - summary line should be immediately after the opening quotes.
+    "D401",     # Pydocstyle - Checks for docstring first lines that are not in an imperative mood.
+    "S311",     # Flake8-bandit - Standard pseudo-random generators are not suitable for security/cryptographic purposes
+    "PERF401",  # Perflint - Checks for for loops that can be replaced by a list comprehension.
+    "RET504",   # Flake8-return - Checks for variable assignments that immediately precede a return of the assigned variable.
+    "FA102",    # Flake8-future-annotations - Missing `from __future__ import annotations`, but uses PEP 604 union
+    "PLR0913",  # Too many arguments in function definition ({c_args} > {max_args})
+]
+
+# --- Docstring Convention Configuration ---
+# This new section `[lint.pydocstyle]` is how you configure rules specific to the "D" category.
+# It corresponds to `[tool.ruff.lint.pydocstyle]` in pyproject.toml.
+[lint.pydocstyle]
+# This ensures consistency across your project's docstrings.
+# Common conventions include "google", "numpy", and "pep257".
+convention = "google" # Uncomment and choose your preferred style
+
+# =============================================================================
+# Formatter Configuration (Independent of Linter but works in harmony)
+# =============================================================================
+[format] # This corresponds to [tool.ruff.format] in pyproject.toml
+quote-style = "double"  # Use double quotes for strings (e.g., "hello"). "single" is the other option.
+indent-style = "space"  # Use spaces for indentation. "tab" is the other option (less common in Python).
+# Whether to skip adding "magic" trailing commas in specific contexts (like single-line lists).
+# `false` (default) means Ruff will add them where they improve diffs and readability,
+# aligning with common modern Python formatting.
+skip-magic-trailing-comma = false

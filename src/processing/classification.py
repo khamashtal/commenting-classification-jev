@@ -5,8 +5,10 @@ measuring capitals, spotting a URL — stays in code, because Jev's own document
 it does not count reliably. Jev is asked only for judgments a knowledgeable person makes
 in a second.
 
-Every threshold and weight lives in a constant at the top of this module, so changing
-policy is a number under review rather than a reworded question.
+Every threshold and weight arrives as a `ClassificationConfig`, read from
+`config.toml` at startup and passed in. Nothing here reaches for a global, so the same
+functions serve a CLI run, an HTTP request and a test holding a policy of its own, and
+changing policy is a number under review rather than a reworded question.
 """
 
 from __future__ import annotations
@@ -22,7 +24,8 @@ import msgspec
 from typesafe_sdk import SystemOneResponse
 
 from clients.jev import JevClient, Spend
-from clients.vf_mcp import Comment
+from clients.viafoura import Comment
+from processing.config import ClassificationConfig
 from processing.fetch import ArticleThread
 from processing.log_config import logger
 from processing.questions import (
@@ -37,44 +40,17 @@ from processing.store import ThreadStore
 
 # ------------------------------------------------------------------- code-side policy
 
-MIN_WORDS = 15  # below this the brief calls a comment substance-free
-MAX_CAPS_RATIO = 0.5  # share of alphabetic characters that may be upper case
-SWEET_SPOT = (20, 100)  # the brief's preferred length, reported but not enforced
+# Which domains a link may point at. This one stays in code rather than in `config.toml`:
+# it is the boundary the brief draws around content we can vouch for, not a number to
+# tune, and widening it is a decision that belongs in a reviewed diff.
 TELEGRAPH_DOMAINS = ("telegraph.co.uk",)
 
 _URL_RE = re.compile(r"https?://\S+|www\.\S+", re.IGNORECASE)
 _WORD_RE = re.compile(r"\S+")
 
-# ------------------------------------------------------------------ Jev-side policy
-
-# id -> (excludes at or beyond, flags for review at or beyond). A signal whose value
-# rises with risk uses "high" direction; on_topic is the one where a LOW value is bad.
-EXCLUDE_AT: dict[str, float] = {
-    "sarcasm": 0.70,
-    "personal_attack": 0.70,
-    "group_hostility": 0.60,
-    "profanity_or_threat": 0.60,
-    "unverified_claim": 1.5,  # Score, 0–2; only the top level is a real problem
-}
-FLAG_AT: dict[str, float] = {
-    "sarcasm": 0.40,
-    "personal_attack": 0.40,
-    "group_hostility": 0.35,
-    "profanity_or_threat": 0.35,
-    "unverified_claim": 1.0,
-}
-# on_topic runs the other way: high is good.
-ON_TOPIC_EXCLUDE_BELOW = 0.35
-ON_TOPIC_FLAG_BELOW = 0.60
-
-WEIGHTS: dict[str, float] = {
-    "experience": 0.35,  # personal_experience x experience_relevant
-    "tone": 0.15,
-    "readability": 0.10,
-    "contribution": 0.15,  # max(proposes_solution, reasoned_argument)
-    "standalone": 0.10,
-    "representativeness": 0.15,
-}
+# Everything else — the word floor, the caps ceiling, the sweet spot, the exclusion and
+# flag thresholds and the score weights — arrives as a `ClassificationConfig`. See
+# `processing/config.py` for the shape and `config.toml` for the values in force.
 
 
 # ----------------------------------------------------------------------- data classes
@@ -89,9 +65,10 @@ class CodeSignals:
     has_external_url: bool
     has_paragraph_break: bool
 
-    @property
-    def in_sweet_spot(self) -> bool:
-        return SWEET_SPOT[0] <= self.word_count <= SWEET_SPOT[1]
+    def in_sweet_spot(self, config: ClassificationConfig) -> bool:
+        """Whether the length is the brief's preferred one. Reported, never enforced."""
+        low, high = config.sweet_spot
+        return low <= self.word_count <= high
 
 
 @dataclass(slots=True)
@@ -184,18 +161,22 @@ def _has_external_url(text: str) -> bool:
     return False
 
 
-def hard_exclusion(comment: Comment, signals: CodeSignals) -> str | None:
+def hard_exclusion(
+    comment: Comment,
+    signals: CodeSignals,
+    config: ClassificationConfig,
+) -> str | None:
     """A reason to skip Jev entirely, or None to go ahead.
 
     Applied before classification, so a four-word comment never costs an API call.
     """
     if comment.state and comment.state != "visible":
         return f"not visible (state: {comment.state})"
-    if signals.word_count < MIN_WORDS:
-        return f"too short ({signals.word_count} words, minimum {MIN_WORDS})"
+    if signals.word_count < config.min_words:
+        return f"too short ({signals.word_count} words, minimum {config.min_words})"
     if signals.has_external_url:
         return "contains a link off telegraph.co.uk"
-    if signals.caps_ratio > MAX_CAPS_RATIO:
+    if signals.caps_ratio > config.max_caps_ratio:
         return f"mostly capitals ({signals.caps_ratio:.0%})"
     return None
 
@@ -268,29 +249,29 @@ async def _classify_one(
 # ----------------------------------------------------------------- verdict and ranking
 
 
-def apply_thresholds(record: Classification) -> None:
+def apply_thresholds(record: Classification, config: ClassificationConfig) -> None:
     """Set ``excluded_reason`` and ``flags`` from the Jev answers."""
     if not record.classified:
         return
 
-    for qid, limit in EXCLUDE_AT.items():
+    for qid, limit in config.exclude_at.items():
         value = record.answers.get(qid, 0.0)
         if isinstance(value, (int, float)) and value >= limit:
             record.excluded_reason = f"{qid} {value:.2f} (excludes at {limit})"
             return
 
     on_topic = record.noul("on_topic")
-    if on_topic < ON_TOPIC_EXCLUDE_BELOW:
+    if on_topic < config.on_topic_exclude_below:
         record.excluded_reason = (
-            f"off topic {on_topic:.2f} (excludes below {ON_TOPIC_EXCLUDE_BELOW})"
+            f"off topic {on_topic:.2f} (excludes below {config.on_topic_exclude_below})"
         )
         return
 
-    for qid, limit in FLAG_AT.items():
+    for qid, limit in config.flag_at.items():
         value = record.answers.get(qid, 0.0)
         if isinstance(value, (int, float)) and value >= limit:
             record.flags.append(f"{qid} {value:.2f}")
-    if on_topic < ON_TOPIC_FLAG_BELOW:
+    if on_topic < config.on_topic_flag_below:
         record.flags.append(f"on_topic {on_topic:.2f}")
 
 
@@ -309,11 +290,16 @@ def stance_shares(records: list[Classification]) -> dict[str, float]:
     return {stance: count / total for stance, count in counts.items()}
 
 
-def quality_score(record: Classification, shares: dict[str, float]) -> float:
-    """Combine the answers into one number, with the weights above.
+def quality_score(
+    record: Classification,
+    shares: dict[str, float],
+    config: ClassificationConfig,
+) -> float:
+    """Combine the answers into one number, with the configured weights.
 
     Each part is on 0–1 before weighting, so the weights mean what they say.
     """
+    weights = config.weights
     experience = record.normalised("personal_experience") * record.noul(
         "experience_relevant",
     )
@@ -323,12 +309,12 @@ def quality_score(record: Classification, shares: dict[str, float]) -> float:
     )
     representativeness = shares.get(record.stance, 0.0)
     return (
-        WEIGHTS["experience"] * experience
-        + WEIGHTS["tone"] * record.normalised("tone")
-        + WEIGHTS["readability"] * record.normalised("readability")
-        + WEIGHTS["contribution"] * contribution
-        + WEIGHTS["standalone"] * record.noul("standalone")
-        + WEIGHTS["representativeness"] * representativeness
+        weights["experience"] * experience
+        + weights["tone"] * record.normalised("tone")
+        + weights["readability"] * record.normalised("readability")
+        + weights["contribution"] * contribution
+        + weights["standalone"] * record.noul("standalone")
+        + weights["representativeness"] * representativeness
     )
 
 
@@ -416,6 +402,7 @@ async def classify_thread(
     *,
     client: JevClient,
     thread: ArticleThread,
+    config: ClassificationConfig,
     article_max_words: int,
     store: ThreadStore | None = None,
 ) -> ClassificationResult:
@@ -433,7 +420,7 @@ async def classify_thread(
         for c in thread.comments
     ]
     for record in records:
-        reason = hard_exclusion(record.comment, record.signals)
+        reason = hard_exclusion(record.comment, record.signals, config)
         if reason:
             record.excluded_reason = reason
 
@@ -482,15 +469,16 @@ async def classify_thread(
         ),
     )
 
-    # Thresholds are re-derived every run, including for restored answers, so a change
-    # to EXCLUDE_AT or FLAG_AT takes effect on the whole thread without re-billing.
+    # Thresholds are re-derived every run, including for restored answers, so an edit
+    # to `[classification]` in config.toml takes effect on the whole thread without
+    # re-billing a single comment. Only `[article] max_words` costs money to change.
     for record in eligible:
-        apply_thresholds(record)
+        apply_thresholds(record, config)
 
     shares = stance_shares(records)
     for record in records:
         if record.classified:
-            record.quality_score = quality_score(record, shares)
+            record.quality_score = quality_score(record, shares, config)
 
     return ClassificationResult(
         records=records,

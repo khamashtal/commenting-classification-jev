@@ -7,7 +7,13 @@ stood, so each one is a regression guard rather than a restatement.
 from __future__ import annotations
 
 import pytest
-from conftest import FakeJev, FakeResponse, make_comment, make_thread
+from conftest import (
+    CLASSIFICATION,
+    FakeJev,
+    FakeResponse,
+    make_comment,
+    make_thread,
+)
 
 from processing.classification import battery_fingerprint, classify_thread
 from processing.store import (
@@ -51,6 +57,7 @@ class TestMalformedResponse:
         result = await classify_thread(
             client=BrokenJev(break_on=bad.text),
             thread=make_thread([*good, bad]),
+            config=CLASSIFICATION,
             article_max_words=600,
             store=store,
         )
@@ -67,6 +74,7 @@ class TestMalformedResponse:
         await classify_thread(
             client=BrokenJev(break_on=bad.text),
             thread=make_thread([*good, bad]),
+            config=CLASSIFICATION,
             article_max_words=600,
             store=store,
         )
@@ -96,6 +104,7 @@ class TestInterruptedRun:
             await classify_thread(
                 client=Interrupting(),
                 thread=make_thread(comments),
+                config=CLASSIFICATION,
                 article_max_words=600,
                 store=store,
             )
@@ -117,6 +126,7 @@ class TestFingerprint:
         await classify_thread(
             client=FakeJev(),
             thread=make_thread([comment]),
+            config=CLASSIFICATION,
             article_max_words=600,
             store=store,
         )
@@ -232,6 +242,7 @@ class TestPerCommentModel:
         await classify_thread(
             client=FakeJev(model="jev-1.13.0"),
             thread=make_thread(comments),
+            config=CLASSIFICATION,
             article_max_words=600,
             store=store,
         )
@@ -307,6 +318,7 @@ class TestRestoredMetadata:
         await classify_thread(
             client=FakeJev(model="jev-1.13.0"),
             thread=make_thread([comment]),
+            config=CLASSIFICATION,
             article_max_words=600,
             store=store,
         )
@@ -315,6 +327,7 @@ class TestRestoredMetadata:
         result = await classify_thread(
             client=FakeJev(),
             thread=make_thread([comment]),
+            config=CLASSIFICATION,
             article_max_words=600,
             store=load_store("container-1", state_dir),
         )

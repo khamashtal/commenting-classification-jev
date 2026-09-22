@@ -6,7 +6,6 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "aiohttp>=3.14.3",
-    "mcp>=2.2.0",
     "msgspec>=0.21.1",
     "python-dotenv>=1.2.3",
     "typesafe-sdk>=0.6.0",

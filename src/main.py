@@ -1,4 +1,4 @@
-"""Manual test harness for the Viafoura MCP client.
+"""Manual test harness for the Viafoura client.
 
 Run from the project root:
 
@@ -10,6 +10,9 @@ Run from the project root:
 It resolves the article, fetches the top comments, the comments posted in the last few
 hours, and a capped sample of the whole thread, prints a summary and writes the sample
 to ``output/``. Tweak the constants below rather than adding CLI flags.
+
+No credential is involved: Viafoura's read endpoints are public. `load_settings()` is
+called only for `[viafoura]` — the section uuid, the timeouts and the retry policy.
 """
 
 from __future__ import annotations
@@ -20,14 +23,16 @@ import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from dotenv import load_dotenv
+import aiohttp
 
-from clients.vf_mcp import (
+from clients.viafoura import (
     Comment,
-    ViafouraMCPClient,
-    ViafouraMCPError,
+    ViafouraClient,
+    ViafouraError,
     comments_to_dicts,
+    is_uuid,
 )
+from processing.settings import load_settings
 
 # Article to test with: a URL, a Telegraph page id, or a Viafoura container UUID.
 ARTICLE = "https://www.telegraph.co.uk/health-fitness/conditions/ageing/longevity-lessons-britain-can-learn-from-singapore/"
@@ -73,25 +78,26 @@ def show(title: str, comments: list[Comment], limit: int = 5) -> None:
         print(f"  ... {len(comments) - limit} more")
 
 
-async def describe(vf: ViafouraMCPClient, article: str) -> str | None:
+async def describe(vf: ViafouraClient, article: str) -> str | None:
     """Resolve the article to a container UUID and print what Viafoura knows about it.
 
     Returns None (after explaining) when the article cannot be resolved.
     """
     try:
+        # Resolve first. A uuid passes straight through with no request at all, whereas
+        # `container_details` takes a page id: handing it a uuid means a flat lookup
+        # that cannot match, so the documented "run me with a container UUID" usage
+        # would 404 before it ever got here.
         uuid = await vf.resolve_container_uuid(article)
-        record = await vf.get_container(article)
-    except ViafouraMCPError as exc:  # covers an unreachable page and an unknown id
+        record = None if is_uuid(article) else await vf.container_details(article)
+    except ViafouraError as exc:  # an unknown id, or the API refusing the request
         print(f"\nCould not resolve {article!r}:\n  {exc}")
         print(
-            "\nCheck the URL is a live Telegraph article with comments enabled. "
+            "\nCheck the id belongs to a live Telegraph article with comments enabled. "
             "Articles that are currently active, for reference:",
         )
-        trending = await vf.call_tool("get_trending_containers", {"limit": 5})
-        items = trending.get("trending", []) if isinstance(trending, dict) else []
-        for item in items:
-            if isinstance(item, dict):
-                print(f"  {item.get('container_id')!s:<16} {item.get('origin_url')}")
+        for item in (await vf.trending(limit=5))[:5]:
+            print(f"  {item.container_id:<16} {item.url}")
         return None
 
     print(f"\nResolved {article}\n      -> {uuid}")
@@ -102,11 +108,11 @@ async def describe(vf: ViafouraMCPClient, article: str) -> str | None:
 
 
 async def main(article: str) -> None:
-    load_dotenv(override=True)
+    settings = load_settings()
     started = datetime.now(UTC)
 
-    async with ViafouraMCPClient() as vf:
-        print(f"Connected; server tools: {', '.join(await vf.list_tools())}")
+    async with aiohttp.ClientSession() as session:
+        vf = ViafouraClient(session, settings.viafoura)
 
         uuid = await describe(vf, article)
         if uuid is None:

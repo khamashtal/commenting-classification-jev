@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import pytest
-from conftest import make_comment
+from conftest import make_comment, make_viafoura
 
-from clients.vf_mcp import ViafouraMCPClient, ViafouraMCPError
+from clients.viafoura import ViafouraError
 from processing.fetch import (
     Article,
     ArticleThread,
@@ -129,18 +129,16 @@ class TestParentText:
 
 
 class TestNoScraping:
-    async def test_the_client_refuses_a_url(self) -> None:
+    def test_the_client_refuses_a_url(self) -> None:
         """Resolving a URL meant fetching the page; that route is gone."""
-        client = ViafouraMCPClient("key")
-        with pytest.raises(ViafouraMCPError, match="URL"):
-            await client._to_container_id("https://www.telegraph.co.uk/news/x/")
+        with pytest.raises(ViafouraError, match="URL"):
+            make_viafoura()._require_id("https://www.telegraph.co.uk/news/x/")
 
-    async def test_an_id_passes_through_untouched(self) -> None:
-        client = ViafouraMCPClient("key")
-        assert await client._to_container_id("A65vpYj1jg7t") == "A65vpYj1jg7t"
+    def test_an_id_passes_through_untouched(self) -> None:
+        assert make_viafoura()._require_id("A65vpYj1jg7t") == "A65vpYj1jg7t"
 
     def test_the_scraping_helpers_are_gone(self) -> None:
-        import clients.vf_mcp as vf
+        import clients.viafoura as vf
 
         for name in ("container_id_from_url", "container_id_from_html"):
             assert not hasattr(vf, name), f"{name} was removed; it must not come back"

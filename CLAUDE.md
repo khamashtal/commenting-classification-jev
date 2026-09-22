@@ -27,26 +27,32 @@ URL checks, all-caps ratio, thresholds, weights) stays in code.
 **Do not open, read, cat, grep, copy, edit or print `.env` (or `.env.*`), for any reason,
 even redacted, even when the user seems to ask for it.** If a value is needed, read it at
 runtime through `os.environ` inside code that the user runs; if a variable seems missing
-or wrong, say so and ask the user to check it themselves. The same applies to the OAuth
-token cache (`~/.jev_ai/vf_mcp_tokens.json`), which holds live bearer tokens.
+or wrong, say so and ask the user to check it themselves.
 
 Read settings through `processing.settings`, never `os.environ` scattered through the
 code: `load_settings()` once at startup (in `main()`, or a FastAPI lifespan handler),
 `get_settings()` everywhere else. Functions take a `Settings` argument rather than calling
 `get_settings()` themselves, which keeps them testable and request-agnostic. The same
-applies to long-lived clients (`aiohttp.ClientSession`, `ViafouraMCPClient`,
+applies to long-lived clients (`aiohttp.ClientSession`, `ViafouraClient`,
 `AsyncTypeSafeClient`): build once at startup, pass down, never construct per call.
+
+**There are two sources and one rule: no key appears in both.** `.env` holds secrets and
+account endpoints; `config.toml` at the project root holds everything else — thresholds,
+weights, limits, paths. Both are read once by `load_settings()`. The single exception is
+`HOST` and `PORT`, which override `[api] host` and `[api] port` so a deployment can move
+off loopback without editing a committed file.
 
 The variables the code expects, documented here so the file never has to be opened:
 
 | Variable | Used for |
 | --- | --- |
-| `api_key` (or `TYPESAFE_API_KEY`) | TypeSafe / Jev API key |
-| `vf_key` (or `VF_MCP_API_KEY`) | Viafoura Comments MCP API key |
-| `VF_SECTION_UUID` | Viafoura section (site) UUID; skips a discovery call |
+| `jev_api_key` (or `TYPESAFE_API_KEY`) | TypeSafe / Jev API key |
 | `CAPI_URL`, `CONTENT_READER_APIGEE_KEY` | Telegraph CAPI, for article text |
 | `ENVIRONMENT` | `dev` / `prod`; sets the log level |
-| `VF_MCP_URL`, `VF_MCP_TOKEN_STORE`, `VF_LIVECOMMENTS_URL` | Optional overrides |
+| `HOST`, `PORT` | Override `[api]`; only set in a deployment |
+
+**Viafoura needs no credential.** Its read endpoints are public, so this project holds no
+Viafoura secret at all. The section uuid is not a secret and lives in `config.toml`.
 
 Never print, log or commit secret values, and keep `.env` and `~/.jev_ai/` out of git.
 
@@ -78,7 +84,7 @@ this project needs about an article comes from CAPI: the body text, and the Tele
 premium articles — an anonymous page fetch returns **HTTP 402** on most of them, so
 scraping was never a working route, only one that happened to survive on free articles.
 
-`ViafouraMCPClient` therefore refuses a URL outright and takes a page id or container
+`ViafouraClient` therefore refuses a URL outright and takes a page id or container
 UUID. If something seems to need a page, the answer is another CAPI field or another API,
 not a request for the HTML.
 
@@ -91,8 +97,12 @@ not a request for the HTML.
   project. Spec: `.claude/comment-classification-spec.md`.
 - `src/main.py`: manual test harness for the Viafoura client (`uv run python src/main.py
   [container_id]`); constants at the top control what it fetches.
-- `src/clients/vf_mcp.py`: Viafoura Comments MCP client (see below). Python API only,
-  no CLI; async core plus sync one-shot helpers.
+- `src/clients/viafoura.py`: Viafoura Live Comments client (see below). Reads the
+  public REST API with no authentication, over the `aiohttp` session it shares with
+  CAPI. Python API only, no CLI.
+- `src/processing/config.py`: the shape of `config.toml` and how one is read and checked.
+  Imports nothing else from the project, so `settings.py` and `classification.py` can
+  both use it without importing each other.
 - `src/clients/jev.py`: TypeSafe/Jev client. Wraps the SDK with the rate limiting the
   published limits need (token buckets for both 1,200 req/min and 250k tok/s, halving on
   an observed 429 and recovering on a clean streak), a concurrency bound, a retry policy
@@ -112,36 +122,55 @@ not a request for the HTML.
 - `state/`: the store. **Not** disposable — deleting it means paying Jev again for every
   comment. Gitignored.
 - `tests/`: the suite. No Jev calls, ever.
-- Add new modules under `src/`; import as `from clients.vf_mcp import …`. `pyproject.toml`
+- Add new modules under `src/`; import as `from clients.viafoura import …`. `pyproject.toml`
   installs `src/clients` and `src/processing` into the venv as editable packages, so imports
   resolve regardless of the working directory. A new top-level package under `src/` must be
   added to `[tool.hatch.build.targets.wheel] packages` and then `uv sync` re-run.
 
-## Viafoura Comments MCP (verified 2026-09-21)
+## Viafoura Live Comments API (verified 2026-09-22)
 
-- Server: `https://comments-mcp.viafoura.co/mcp`, official `mcp` Python SDK (2.x, uses
-  `httpx2`; SDK model fields are snake_case, e.g. `input_schema`, `is_error`).
-- Auth is OAuth authorization-code + PKCE with dynamic registration. The API key is NOT a
-  bearer token; the `/authorize` page is an HTML form with field `api_key` that 302s back
-  with the code. `vf_mcp.py` submits that form headlessly through the SDK's
-  `OAuthClientProvider` and caches tokens in `VF_MCP_TOKEN_STORE`.
-- The MCP server's id-based tools (`get_content_container(s)`, `get_top_comments`,
-  `get_comment_count`, `search_comments`) return "Container not found" for every
-  identifier, including the `container_id` values the server's own trending tool
-  returns. `get_comments` by `content_container_uuid` works. The client therefore
-  resolves ids through Viafoura's public Live Comments API instead:
-  `GET https://livecomments.viafoura.co/v4/livecomments/{section_uuid}?container_id=<id>&limit=0`
-  (no auth; 404 for unknown ids) returns `content_container_uuid`. The Telegraph page id
-  (e.g. `A65xRHy7KY6g`) is the Viafoura `container_id`, and **CAPI returns it** as
-  `metadata.page-id` — `processing.fetch` reads it there and puts it on `Article.page_id`.
-  The Telegraph section_uuid is `00000000-0000-4000-8000-010fdf3f0a45`.
-- `get_comments` returns `{"more_available", "contents": [...]}` as a flat list, replies
+**No API key, no OAuth, no MCP server.** The public REST API at
+`https://livecomments.viafoura.co` serves everything this project needs anonymously; the
+OpenAPI definition marks both read endpoints `optional` auth. The MCP client, its OAuth +
+PKCE flow, its headless form login and its `~/.jev_ai/` token cache are all deleted, and
+the `mcp` dependency with them.
+
+- Three endpoints, where `{section}` is `00000000-0000-4000-8000-010fdf3f0a45`:
+  - `GET /v4/livecomments/{section}?container_id=<page id>&limit=0` — the container
+    record: its uuid and the visible/pinned/picked counts. `limit=0` makes this a cheap
+    way to ask how many pinned comments an article has *before* downloading the thread.
+  - `GET /v4/livecomments/{section}/{container_uuid}/comments` — the thread.
+  - `GET /v4/livecomments/{section}/trending` — article discovery.
+- The Telegraph page id (e.g. `A65xRHy7KY6g`) is the Viafoura `container_id`, and **CAPI
+  returns it** as `metadata.page-id` — `processing.fetch` reads it there and puts it on
+  `Article.page_id`.
+- Comments come back as `{"more_available", "contents": [...]}`, a flat list with replies
   inline after their parent (top-level when `parent_uuid == content_container_uuid`).
-  `limit` (max 100) counts top-level only; paginate with `starting_from` = last top-level
-  uuid; pinned comments float first in every sort; there is no server-side time filter
-  (the client pages newest-first and stops). Payload has `actor_uuid` only, no usernames.
-- Default lookback of the trending/site tools is 48 h; article-level tools return the
-  full current thread.
+  `limit` **caps at 100** — undocumented but hard, `limit=101` is a 400 — and counts
+  top-level only, so `reply_limit` (max 50) never changes the page count. Pinned comments
+  float first in every sort. There is no server-side time filter, so the client pages
+  newest-first and stops. The payload has `actor_uuid` only, no usernames.
+- **Two silent traps.** The API accepts unknown query parameters without complaint, so
+  both return HTTP 200 while doing the wrong thing:
+  1. `starting_from` is **ignored on the flat `?container_id=` form**, which returns page
+     1 for ever. Paging happens only on the nested path; `fetch_page` refuses anything
+     that is not a uuid so this cannot happen by accident.
+  2. An **unknown cursor is ignored**. Comment uuids are genuinely UUIDv7, so fabricating
+     cursors to page one thread concurrently looks possible; the server resolves
+     `starting_from` by lookup and falls back to page 1. The `seen` set and the
+     "cursor did not advance" check in `iter_comments` are what catch it, and
+     `tests/test_viafoura.py` holds both as regression tests.
+- Paging **one** article cannot be parallelised: `offset`, `page`, `after` and `cursor`
+  are all ignored. Paging across different articles shares no cursor and parallelises
+  freely — that is the harvest, not this API.
+- Trending takes two **different** windows, and conflating them is what produced the
+  "Viafoura only goes back 48 hours" belief: `content_window_hours` bounds comment
+  activity (max 48) while `content_container_window_days` bounds article age (max 30).
+  `sorted_by=total_visible_contents` is required and is the only value its enum holds.
+  Results carry `content_container_uuid`, so discovery needs no resolution hop.
+- **Writes stay out of scope.** Pinning needs `{"TokenInCookie": ["mod"]}` — a JWT for a
+  Viafoura account holding the moderator role, which can also delete comments and ban
+  users — not a static bearer key.
 
 ## TypeSafe / Jev conventions
 

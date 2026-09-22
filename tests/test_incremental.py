@@ -3,21 +3,30 @@
 from __future__ import annotations
 
 from conftest import (
+    CLASSIFICATION,
     GOOD_ANSWERS,
     WEAK_ANSWERS,
     FakeJev,
+    make_classification_config,
     make_comment,
     make_thread,
 )
 
 from processing.classification import classify_thread
+from processing.config import ClassificationConfig
 from processing.store import ThreadStore, load_store, save_store
 
 
-async def _run(jev: FakeJev, comments, store: ThreadStore | None):  # noqa: ANN001, ANN202
+async def _run(  # noqa: ANN202
+    jev: FakeJev,
+    comments,  # noqa: ANN001
+    store: ThreadStore | None,
+    config: ClassificationConfig = CLASSIFICATION,
+):
     return await classify_thread(
         client=jev,
         thread=make_thread(comments),
+        config=config,
         article_max_words=600,
         store=store,
     )
@@ -167,8 +176,6 @@ async def test_code_excluded_comments_never_reach_jev(state_dir) -> None:
 
 async def test_thresholds_are_reapplied_to_restored_answers(state_dir) -> None:
     """Retuning a threshold must take effect on old comments without re-billing."""
-    import processing.classification as c
-
     comment = make_comment(
         "c-1",
         "A comment that will be re-judged when the sarcasm "
@@ -179,15 +186,20 @@ async def test_thresholds_are_reapplied_to_restored_answers(state_dir) -> None:
     save_store(store, state_dir)
     assert not (await _run(FakeJev(), [comment], store)).excluded
 
-    original = c.EXCLUDE_AT["sarcasm"]
-    try:
-        c.EXCLUDE_AT["sarcasm"] = 0.4
-        jev = FakeJev()
-        result = await _run(jev, [comment], load_store("container-1", state_dir))
-        assert jev.calls == [], "retuning must not cost a single call"
-        assert [r.comment.uuid for r in result.excluded] == ["c-1"]
-    finally:
-        c.EXCLUDE_AT["sarcasm"] = original
+    # The retune is a different config handed to the same stored answers, which is
+    # exactly what editing `config.toml` between two runs does.
+    retuned = make_classification_config(
+        exclude_at={**CLASSIFICATION.exclude_at, "sarcasm": 0.4},
+    )
+    jev = FakeJev()
+    result = await _run(
+        jev,
+        [comment],
+        load_store("container-1", state_dir),
+        retuned,
+    )
+    assert jev.calls == [], "retuning must not cost a single call"
+    assert [r.comment.uuid for r in result.excluded] == ["c-1"]
 
 
 async def test_model_is_still_named_when_everything_is_reused(state_dir) -> None:

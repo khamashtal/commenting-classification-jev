@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 from conftest import (
+    CLASSIFICATION,
     GOOD_ANSWERS,
     SARCASTIC_ANSWERS,
     WEAK_ANSWERS,
@@ -14,8 +15,6 @@ from conftest import (
 )
 
 from processing.classification import (
-    EXCLUDE_AT,
-    MIN_WORDS,
     classify_thread,
     compute_signals,
     hard_exclusion,
@@ -58,9 +57,9 @@ class TestHardExclusion:
 
     def test_short_comment_excluded(self) -> None:
         comment = make_comment(text="Too short entirely.")
-        reason = hard_exclusion(comment, compute_signals(comment.text))
+        reason = hard_exclusion(comment, compute_signals(comment.text), CLASSIFICATION)
         assert reason is not None
-        assert str(MIN_WORDS) in reason
+        assert str(CLASSIFICATION.min_words) in reason
 
     def test_external_link_excluded(self) -> None:
         text = (
@@ -68,7 +67,12 @@ class TestHardExclusion:
             "word count, that happens to link to https://example.com/x as well."
         )
         assert "link" in (
-            hard_exclusion(make_comment(text=text), compute_signals(text)) or ""
+            hard_exclusion(
+                make_comment(text=text),
+                compute_signals(text),
+                CLASSIFICATION,
+            )
+            or ""
         )
 
     def test_shouting_excluded(self) -> None:
@@ -76,32 +80,51 @@ class TestHardExclusion:
             "THIS IS ENTIRELY IN CAPITALS AND GOES ON FOR RATHER A LONG TIME INDEED YES"
         )
         assert "capitals" in (
-            hard_exclusion(make_comment(text=text), compute_signals(text)) or ""
+            hard_exclusion(
+                make_comment(text=text),
+                compute_signals(text),
+                CLASSIFICATION,
+            )
+            or ""
         )
 
     def test_invisible_comment_excluded(self) -> None:
         comment = make_comment(state="pending")
-        assert hard_exclusion(comment, compute_signals(comment.text)) is not None
+        assert (
+            hard_exclusion(comment, compute_signals(comment.text), CLASSIFICATION)
+            is not None
+        )
 
     def test_good_comment_passes(self) -> None:
         comment = make_comment()
-        assert hard_exclusion(comment, compute_signals(comment.text)) is None
+        assert (
+            hard_exclusion(comment, compute_signals(comment.text), CLASSIFICATION)
+            is None
+        )
 
 
 class TestScoring:
     def test_score_is_bounded(self) -> None:
         record = make_record(make_comment(), GOOD_ANSWERS)
-        score = quality_score(record, {"supportive": 1.0})
+        score = quality_score(record, {"supportive": 1.0}, CLASSIFICATION)
         assert 0.0 <= score <= 1.0
 
     def test_better_answers_score_higher(self) -> None:
         shares = {"supportive": 1.0}
-        good = quality_score(make_record(make_comment(), GOOD_ANSWERS), shares)
-        weak = quality_score(make_record(make_comment(), WEAK_ANSWERS), shares)
+        good = quality_score(
+            make_record(make_comment(), GOOD_ANSWERS),
+            shares,
+            CLASSIFICATION,
+        )
+        weak = quality_score(
+            make_record(make_comment(), WEAK_ANSWERS),
+            shares,
+            CLASSIFICATION,
+        )
         assert good > weak
 
     def test_missing_answers_score_zero_rather_than_raising(self) -> None:
-        assert quality_score(make_record(make_comment(), {}), {}) == 0.0
+        assert quality_score(make_record(make_comment(), {}), {}, CLASSIFICATION) == 0.0
 
     def test_stance_shares_sum_to_one(self) -> None:
         records = [make_record(make_comment(f"c-{i}"), GOOD_ANSWERS) for i in range(4)]
@@ -114,8 +137,8 @@ class TestScoring:
     def test_minority_stance_scores_lower_but_is_not_excluded(self) -> None:
         """The brief wants dissent ranked down, never removed."""
         record = make_record(make_comment(), GOOD_ANSWERS)
-        majority = quality_score(record, {"supportive": 0.9})
-        minority = quality_score(record, {"supportive": 0.1})
+        majority = quality_score(record, {"supportive": 0.9}, CLASSIFICATION)
+        minority = quality_score(record, {"supportive": 0.1}, CLASSIFICATION)
         assert majority > minority > 0.0
 
 
@@ -125,16 +148,21 @@ class TestThresholds:
         result = await classify_thread(
             client=FakeJev(default=SARCASTIC_ANSWERS),
             thread=make_thread([comment]),
+            config=CLASSIFICATION,
             article_max_words=600,
         )
         assert [r.comment.uuid for r in result.excluded] == [comment.uuid]
         assert "sarcasm" in (result.records[0].excluded_reason or "")
 
     async def test_middle_band_is_flagged_not_excluded(self) -> None:
-        answers = {**GOOD_ANSWERS, "sarcasm": (EXCLUDE_AT["sarcasm"] + 0.4) / 2}
+        answers = {
+            **GOOD_ANSWERS,
+            "sarcasm": (CLASSIFICATION.exclude_at["sarcasm"] + 0.4) / 2,
+        }
         result = await classify_thread(
             client=FakeJev(default=answers),
             thread=make_thread([make_comment()]),
+            config=CLASSIFICATION,
             article_max_words=600,
         )
         assert not result.excluded
@@ -146,6 +174,7 @@ class TestEligibility:
         result = await classify_thread(
             client=FakeJev(),
             thread=make_thread([make_comment(is_reply=True)]),
+            config=CLASSIFICATION,
             article_max_words=600,
         )
         assert result.records[0].pin_eligible is False
@@ -159,6 +188,7 @@ class TestEligibility:
         result = await classify_thread(
             client=FakeJev(),
             thread=make_thread([make_comment(is_pinned=pinned, is_picked=picked)]),
+            config=CLASSIFICATION,
             article_max_words=600,
         )
         assert result.records[0].already_actioned is True
@@ -170,6 +200,7 @@ class TestEligibility:
         result = await classify_thread(
             client=FakeJev(),
             thread=make_thread([comment]),
+            config=CLASSIFICATION,
             article_max_words=600,
         )
         assert result.records[0].already_actioned is False
@@ -191,6 +222,7 @@ class TestRunIntegrity:
         result = await classify_thread(
             client=FakeJev(fail_on={bad.text}),
             thread=make_thread([good, bad]),
+            config=CLASSIFICATION,
             article_max_words=600,
         )
         assert len(result.shortlist) == 1
@@ -201,6 +233,7 @@ class TestRunIntegrity:
         result = await classify_thread(
             client=FakeJev(),
             thread=make_thread([]),
+            config=CLASSIFICATION,
             article_max_words=600,
         )
         assert result.records == []
@@ -232,6 +265,7 @@ class TestRunIntegrity:
                 },
             ),
             thread=make_thread(comments),
+            config=CLASSIFICATION,
             article_max_words=600,
         )
         # Asserting the list is sorted restates what `shortlist` does and passes even

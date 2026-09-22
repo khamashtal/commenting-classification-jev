@@ -6,8 +6,10 @@ from datetime import UTC, datetime
 
 import pytest
 from conftest import (
+    CLASSIFICATION,
     FakeJev,
     make_comment,
+    make_settings,
     make_thread,
 )
 
@@ -23,10 +25,18 @@ async def _report(comments, answers_for=None, store=None):  # noqa: ANN001, ANN2
     result = await classify_thread(
         client=FakeJev(answers_for=answers_for or {}),
         thread=thread,
+        config=CLASSIFICATION,
         article_max_words=600,
         store=store,
     )
-    return w.render_report(thread, result, started=STARTED, store=store), result
+    report = w.render_report(
+        thread,
+        result,
+        settings=make_settings(),
+        started=STARTED,
+        store=store,
+    )
+    return report, result
 
 
 class TestInjection:
@@ -135,6 +145,9 @@ class TestContent:
         assert "## Excluded" in report
 
 
+API = make_settings().api
+
+
 class TestSelection:
     def test_score_threshold_bounds(self) -> None:
         class Fake:
@@ -142,19 +155,19 @@ class TestSelection:
                 self.quality_score = score
                 self.already_actioned = False
 
-        # Plenty above the bar: capped at MAX_PROPOSED.
+        # Plenty above the bar: capped at `max_results`.
         many = [Fake(0.9 - 0.01 * i) for i in range(40)]
-        chosen, cleared = w._proposed(many)
-        assert len(chosen) == w.MAX_PROPOSED
+        chosen, cleared = w._proposed(many, API)
+        assert len(chosen) == API.max_results
         assert cleared == 40
 
         # Nothing above the bar: still returns the best few rather than nothing.
         weak = [Fake(0.3), Fake(0.2), Fake(0.1)]
-        chosen, cleared = w._proposed(weak)
+        chosen, cleared = w._proposed(weak, API)
         assert cleared == 0
         assert len(chosen) == 3
 
-        assert w._proposed([]) == ([], 0)
+        assert w._proposed([], API) == ([], 0)
 
     def test_actioned_comments_are_never_proposed(self) -> None:
         class Fake:
@@ -162,7 +175,7 @@ class TestSelection:
                 self.quality_score = score
                 self.already_actioned = actioned
 
-        chosen, _ = w._proposed([Fake(0.9, True), Fake(0.8, False)])
+        chosen, _ = w._proposed([Fake(0.9, True), Fake(0.8, False)], API)
         assert all(not c.already_actioned for c in chosen)
 
 

@@ -1,0 +1,135 @@
+#                            jev_ai — application configuration
+#
+# Everything here is safe to commit. Secrets stay in `.env`, and no key appears in both
+# files, so there are no precedence puzzles: a value lives in exactly one place.
+#
+# The file is read once at startup by `processing.settings.load_settings()` and is not
+# re-read afterwards. Every key is required and type-checked; a missing or mistyped one
+# stops the process rather than falling back to a default.
+#
+# ONE ASYMMETRY MATTERS MORE THAN ANYTHING ELSE HERE:
+#
+#   [article] max_words   is part of the store fingerprint. Changing it DISCARDS every
+#                         stored answer and re-bills the whole thread.
+#   [classification] *    is applied at scoring time. Changing a weight or a threshold
+#                         costs nothing and takes effect on the next run.
+#
+# So recalibrating the scoring is free; trimming the article is not.
+
+[viafoura]
+# The Telegraph's Viafoura section (site) UUID. Not a secret — it appears in the public
+# API's URLs — and knowing it skips a discovery call on every run.
+section_uuid = "00000000-0000-4000-8000-010fdf3f0a45"
+base_url = "https://livecomments.viafoura.co"
+# Comments per page. 100 is the server's hard maximum: 101 is rejected outright. The
+# count is of top-level comments only; replies arrive inline on top of it.
+page_size = 100
+# Replies fetched inline with each top-level comment. 50 is the server maximum.
+reply_limit = 50
+timeout_seconds = 30.0
+# Requests in flight across all articles. Paging one article is strictly sequential —
+# the cursor forbids anything else — so this only opens up when several articles are
+# being read at once, which is what the calibration harvest will do.
+max_concurrent_requests = 8
+# Retries on 408/425/429 and the 5xx family, with exponential backoff and full jitter.
+# No rate limit is documented for this API, so the policy is deliberately conservative.
+max_retries = 3
+backoff_initial_seconds = 0.5
+backoff_max_seconds = 30.0
+
+[jev]
+# "" leaves the version to the API (`jev-latest`), so model improvements arrive without
+# a code change; the version that actually answered is read back off each response and
+# named in the report. Set a version string (e.g. "jev-1.13.0") to freeze it — thresholds
+# calibrated against one version can shift when the alias advances.
+model = ""
+# Requests in flight. This bounds open sockets, not the request rate; the rate is the
+# client's job. At the 18 req/s ceiling, 64 in flight keeps the rate limiter rather than
+# this number as the bottleneck for any mean latency up to ~3.5s.
+concurrency = 64
+timeout_seconds = 30.0
+# The published limits, per API key. See https://docs.typesafe.ai/models.
+requests_per_minute = 1200
+tokens_per_second = 250000
+
+[article]
+# Words of article body sent with every comment. The article dominates token cost, and
+# Jev loses accuracy as the state fills with material a question does not need.
+# CHANGING THIS RE-BILLS EVERY STORED COMMENT. See the note at the top of this file.
+max_words = 600
+
+[classification]
+# Below this the brief calls a comment substance-free. Checked before Jev is called, so
+# a four-word comment never costs an API request.
+min_words = 15
+# Share of alphabetic characters that may be upper case before the comment is dropped.
+max_caps_ratio = 0.5
+# The brief's preferred length, [minimum, maximum]. Reported, never enforced.
+sweet_spot = [20, 100]
+# `on_topic` runs the other way from every other exclusion question: a LOW value is bad,
+# which is why it has its own pair of keys rather than a row in the tables below.
+on_topic_exclude_below = 0.35
+on_topic_flag_below = 0.60
+
+# How the answers combine into one score. Each part is on 0-1 before weighting, so these
+# mean what they say. They must add up to 1.0 for the score to stay on 0-1, and the set
+# of names is fixed by `classification.quality_score` — see `config.WEIGHT_KEYS`.
+#
+# Three of these are composites rather than single questions:
+#   experience        = personal_experience x experience_relevant
+#   contribution      = the better of proposes_solution and reasoned_argument
+#   representativeness = how common this comment's stance is in the thread
+[classification.weights]
+experience = 0.35
+tone = 0.15
+readability = 0.10
+contribution = 0.15
+standalone = 0.10
+representativeness = 0.15
+
+# Drop the comment at or beyond this value. Every key must be a real question id; a
+# typo here is refused at startup rather than silently excluding nothing.
+[classification.exclude_at]
+sarcasm = 0.70
+personal_attack = 0.70
+group_hostility = 0.60
+profanity_or_threat = 0.60
+# A Score on 0-2 rather than a probability: only the top level is a real problem.
+unverified_claim = 1.5
+
+# Keep the comment but mark it for a human at or beyond this value.
+[classification.flag_at]
+sarcasm = 0.40
+personal_attack = 0.40
+group_hostility = 0.35
+profanity_or_threat = 0.35
+unverified_claim = 1.0
+
+[api]
+# Loopback by default: nothing should reach this service from off the machine unless a
+# deployment says so. Cloud Run injects PORT and will not route to a container bound to
+# loopback, so HOST and PORT are the one pair the environment may override — see
+# `settings.load_settings`.
+host = "127.0.0.1"
+port = 8000
+cors_origins = ["http://localhost:3000", "http://127.0.0.1:3000"]
+# The default proposal threshold. The one piece of evidence behind it is thin: on the
+# trial thread the comment the team had actually pinned scored 0.946 and the runner-up
+# 0.454. A request may override it.
+default_min_score = 0.50
+# Never return more than this, however many clear the bar — the brief asks for enough
+# for a carousel, not a sifting burden.
+max_results = 25
+# If fewer than this clear the bar, return the best anyway, marked as below it. A weak
+# thread should still give an editor something to judge rather than nothing.
+min_results = 5
+# How long a request waits for another run's lock on the same article before giving up
+# and returning 409, rather than holding the connection open indefinitely.
+lock_timeout_seconds = 30.0
+
+[paths]
+# Relative to this file, so they mean the same thing from any working directory.
+# `state` is NOT disposable: deleting it means paying Jev again for every comment.
+state_dir = "state"
+feedback_dir = "feedback"
+output_dir = "output"

@@ -166,3 +166,7 @@ output/
 # What the pipeline remembers between runs. Not disposable like output/ — losing it
 # means paying Jev again for every comment — but machine-local, not source.
 state/
+
+# What the Community managers tell us about the suggestions (spec Part III, §19).
+# Reader comment text and reviewer judgments: neither belongs in the repository.
+feedback/

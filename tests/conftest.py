@@ -10,15 +10,25 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 import pytest
 
 from clients.jev import Spend
-from clients.vf_mcp import Comment
+from clients.viafoura import Comment, ViafouraClient
 from processing.classification import Classification, compute_signals
+from processing.config import (
+    ApiConfig,
+    ArticleConfig,
+    ClassificationConfig,
+    JevConfig,
+    PathsConfig,
+    ViafouraConfig,
+)
 from processing.fetch import Article, ArticleThread
 from processing.questions import NOUL_IDS
+from processing.settings import Settings
 
 # A comment Jev likes: first-hand experience, measured, clean on every gate.
 GOOD_ANSWERS: dict[str, Any] = {
@@ -49,6 +59,111 @@ WEAK_ANSWERS: dict[str, Any] = {
     "proposes_solution": 0.05,
     "tone": 1.0,
 }
+
+
+# The policy the suite asserts against. Deliberately written out here rather than read
+# from the project's `config.toml`: a test must fail when the code changes, not when
+# somebody retunes a threshold. `tests/test_settings.py` is where the shipped file is
+# checked, and it is the only test that reads it.
+def make_classification_config(**overrides: Any) -> ClassificationConfig:
+    """The default scoring policy, with any part of it replaced."""
+    values: dict[str, Any] = {
+        "min_words": 15,
+        "max_caps_ratio": 0.5,
+        "sweet_spot": (20, 100),
+        "on_topic_exclude_below": 0.35,
+        "on_topic_flag_below": 0.60,
+        "weights": {
+            "experience": 0.35,
+            "tone": 0.15,
+            "readability": 0.10,
+            "contribution": 0.15,
+            "standalone": 0.10,
+            "representativeness": 0.15,
+        },
+        "exclude_at": {
+            "sarcasm": 0.70,
+            "personal_attack": 0.70,
+            "group_hostility": 0.60,
+            "profanity_or_threat": 0.60,
+            "unverified_claim": 1.5,
+        },
+        "flag_at": {
+            "sarcasm": 0.40,
+            "personal_attack": 0.40,
+            "group_hostility": 0.35,
+            "profanity_or_threat": 0.35,
+            "unverified_claim": 1.0,
+        },
+    }
+    return ClassificationConfig(**{**values, **overrides})
+
+
+CLASSIFICATION = make_classification_config()
+
+
+def make_settings(
+    *,
+    classification: ClassificationConfig | None = None,
+    state_dir: Path | None = None,
+    **api_overrides: Any,
+) -> Settings:
+    """A whole `Settings`, with no file and no environment behind it.
+
+    The credentials are obvious placeholders: nothing in the suite may reach a live
+    service, so a value that could be mistaken for a real key has no business here.
+    """
+    root = state_dir.parent if state_dir is not None else Path("/nonexistent")
+    api: dict[str, Any] = {
+        "host": "127.0.0.1",
+        "port": 8000,
+        "cors_origins": (),
+        "default_min_score": 0.50,
+        "max_results": 25,
+        "min_results": 5,
+        "lock_timeout_seconds": 30.0,
+    }
+    return Settings(
+        capi_url="https://capi.invalid",
+        content_reader_apigee_key="not-a-key",
+        typesafe_api_key="not-a-key",
+        viafoura=ViafouraConfig(
+            section_uuid="00000000-0000-4000-8000-000000000000",
+            base_url="https://livecomments.invalid",
+            page_size=100,
+            reply_limit=50,
+            timeout_seconds=30.0,
+            max_concurrent_requests=4,
+            max_retries=2,
+            backoff_initial_seconds=0.0,
+            backoff_max_seconds=0.0,
+        ),
+        jev=JevConfig(
+            model="jev-1.13.0",
+            concurrency=8,
+            timeout_seconds=30.0,
+            requests_per_minute=1200,
+            tokens_per_second=250_000,
+        ),
+        article=ArticleConfig(max_words=600),
+        classification=classification or CLASSIFICATION,
+        api=ApiConfig(**{**api, **api_overrides}),
+        paths=PathsConfig(
+            state_dir=state_dir or (root / "state"),
+            feedback_dir=root / "feedback",
+            output_dir=root / "output",
+        ),
+        environment="test",
+    )
+
+
+def make_viafoura(session: Any = None) -> ViafouraClient:
+    """A client with whatever session the test wants behind it.
+
+    `None` is deliberate and safe for the paths that never reach the network — refusing
+    a URL, rejecting a non-uuid — and those are the ones worth testing without a fake.
+    """
+    return ViafouraClient(session, make_settings().viafoura)
 
 
 def make_comment(

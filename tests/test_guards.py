@@ -78,7 +78,7 @@ class TestSecrets:
     """Decision: settings are read once, in one place, and never logged."""
 
     def test_environment_is_only_read_where_it_should_be(self) -> None:
-        allowed = {"settings.py", "vf_mcp.py", "log_config.py"}
+        allowed = {"settings.py", "log_config.py"}
         for path in PY_FILES:
             if path.name in allowed:
                 continue

@@ -11,6 +11,10 @@ Settings and the three long-lived clients are created here and passed down, so n
 `fetch.py` or `classification.py` reaches for a global. Moving this behind FastAPI means
 building them in a lifespan handler instead; the stages below do not change.
 
+Thresholds, weights, limits and paths are not in this file: they live in `config.toml`,
+read once by `load_settings()`. What is left below is the handful of knobs that belong to
+*this* command-line harness — which article to run, and how much of its thread to pull.
+
 The Markdown report is a temporary way to inspect the pipeline while the question wording
 and weights are tuned. When the output becomes JSON for an API, the rendering half of this
 module is deleted rather than refactored.
@@ -20,22 +24,21 @@ from __future__ import annotations
 
 import asyncio
 import sys
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 
 import aiohttp
 
-from clients.jev import JevClient
-from clients.vf_mcp import RankedBy, ViafouraMCPClient
+from clients.jev import JevClient, JevLimits
+from clients.viafoura import SortOrder, ViafouraClient
 from processing.classification import (
-    EXCLUDE_AT,
-    ON_TOPIC_EXCLUDE_BELOW,
-    WEIGHTS,
     Classification,
     ClassificationResult,
     battery_fingerprint,
     classify_thread,
 )
+from processing.config import ApiConfig, ClassificationConfig
 from processing.fetch import ArticleThread, fetch_thread
 from processing.log_config import logger
 from processing.settings import Settings, load_settings
@@ -49,6 +52,9 @@ from processing.store import (
 )
 
 # --------------------------------------------------------------------------- run config
+#
+# Only what belongs to this command-line harness. Everything that is policy — thresholds,
+# weights, limits, the model, the paths — is in `config.toml` and arrives as `Settings`.
 
 # A URL, a Telegraph page id (e.g. A65xRHy7KY6g), or a Viafoura container UUID.
 ARTICLE = "https://www.telegraph.co.uk/news/2026/09/21/calais-charity-migrants-posing-children-claim-asylum/"
@@ -63,48 +69,9 @@ ARTICLE = "https://www.telegraph.co.uk/news/2026/09/21/calais-charity-migrants-p
 # expect more comments than the article's headline count suggests, and a lower mean
 # quality, since ranking no longer does any filtering first.
 TOP_N_COMMENTS: int | None = None
-# How Viafoura picks that top N: most_liked, most_replied or trending.
-RANKED_BY: RankedBy = "most_liked"
-# Words of article body sent with every comment. The article dominates token cost, and
-# Jev loses accuracy as the state fills with material a question does not need.
-ARTICLE_MAX_WORDS = 600
-# Jev requests in flight. This bounds open sockets, not the request rate — the rate is
-# the client's job (`clients/jev.py`), which is why this can now sit well above 10. At
-# the 18 req/s ceiling, 64 in flight keeps the rate limiter, not this, as the bottleneck
-# for any mean latency up to ~3.5s.
-CONCURRENCY = 64
-# Per-request HTTP timeout, seconds. The SDK default is 10.
-REQUEST_TIMEOUT = 30.0
-# --- what gets proposed ---------------------------------------------------------------
-#
-# The brief asks for "more than enough for a carousel/pinning, but not so many that
-# sifting these comments becomes a burden in itself", so the cut is by score, bounded at
-# both ends.
-#
-# Only propose comments scoring at least this. The one threshold we have real evidence
-# for is thin: on the trial thread the comment the team had actually pinned scored 0.946
-# and the runner-up 0.454, so a bar at 0.70 would have returned a single comment — not a
-# carousel. 0.50 is a starting guess, to be set properly against the pinned-vs-approved
-# spreadsheet. Raise it as the questions sharpen.
-MIN_SCORE = 0.50
-# Never propose more than this, however many clear the bar. Stops a 1,000-comment
-# liveblog thread from producing a report nobody will read.
-MAX_PROPOSED = 25
-# If fewer than this clear the bar, show the best anyway, marked as below it. A weak
-# thread should still give an editor something to judge rather than an empty report.
-MIN_PROPOSED = 5
-# Unpinned: `None` falls through to the SDK client default, `jev-latest`, so model
-# improvements arrive without a code change. The version that actually answered is read
-# back off each response and named in the report, so a run stays identifiable after the
-# fact. Set this to a version string (e.g. "jev-1.13.0") to freeze it — thresholds
-# calibrated against one version can shift when the alias advances.
-MODEL: str | None = None
-# Where the report goes. Anchored to the project root, not the working directory, so
-# the path is the same whether the script is run from the root or from this folder.
-OUTPUT_DIR = Path(__file__).resolve().parents[2] / "output"
-# What the pipeline remembers between runs, so a second run pays only for new comments.
-# Not in `output/`, which is disposable — losing this costs money, not just a re-render.
-STATE_DIR = Path(__file__).resolve().parents[2] / "state"
+# How Viafoura orders that top N. `num_likes_desc` and `num_replies_desc` are the
+# useful ones here; `newest` and `oldest` take the first or last N instead.
+SORTED_BY: SortOrder = "num_likes_desc"
 
 
 # ------------------------------------------------------------------------- the pipeline
@@ -117,33 +84,40 @@ async def run(
     """Fetch and classify. Owns every client and the store for the duration of the run."""
     async with (
         aiohttp.ClientSession() as session,
-        ViafouraMCPClient(settings.viafoura_api_key) as vf,
         JevClient(
             settings.typesafe_api_key,
-            model=MODEL,
-            concurrency=CONCURRENCY,
-            timeout=REQUEST_TIMEOUT,
+            model=settings.jev.model,
+            limits=JevLimits(
+                requests_per_minute=settings.jev.requests_per_minute,
+                tokens_per_second=settings.jev.tokens_per_second,
+            ),
+            concurrency=settings.jev.concurrency,
+            timeout=settings.jev.timeout_seconds,
         ) as jev,
     ):
+        # Viafoura shares the session rather than opening one of its own: the public
+        # API needs no credential and no handshake, so there is nothing for it to own.
+        vf = ViafouraClient(session, settings.viafoura)
         thread = await fetch_thread(
             vf=vf,
             session=session,
             settings=settings,
             article_ref=article_ref,
             limit=TOP_N_COMMENTS,
-            ranked_by=RANKED_BY,
+            sorted_by=SORTED_BY,
         )
         # The lock makes the read-modify-write around the store safe: without it two
         # runs on one article both pay for the same comments and one set of answers is
         # lost. The fingerprint stops a tuning change reusing answers computed against
         # the old questions.
-        async with locked_async(thread.container_uuid, STATE_DIR):
-            await asyncio.to_thread(sweep_temp_files, STATE_DIR)
+        state_dir = settings.paths.state_dir
+        async with locked_async(thread.container_uuid, state_dir):
+            await asyncio.to_thread(sweep_temp_files, state_dir)
             store = await asyncio.to_thread(
                 load_store,
                 thread.container_uuid,
-                STATE_DIR,
-                battery_fingerprint(ARTICLE_MAX_WORDS),
+                state_dir,
+                battery_fingerprint(settings.article.max_words),
             )
             # So a person opening state/<uuid>.json can tell what it is.
             store.describe(url=thread.article.url, headline=thread.article.headline)
@@ -151,7 +125,8 @@ async def run(
                 result = await classify_thread(
                     client=jev,
                     thread=thread,
-                    article_max_words=ARTICLE_MAX_WORDS,
+                    config=settings.classification,
+                    article_max_words=settings.article.max_words,
                     store=store,
                 )
             finally:
@@ -160,7 +135,7 @@ async def run(
                 # every answer already paid for. `classify_thread` records each answer
                 # as it arrives, so whatever was bought before the interruption is kept.
                 store.note_run()
-                await asyncio.to_thread(save_store, store, STATE_DIR)
+                await asyncio.to_thread(save_store, store, state_dir)
     return thread, result, store
 
 
@@ -175,8 +150,11 @@ def _run_history(store: ThreadStore | None) -> str:
     return f" · run {store.runs}, first seen {first} UTC"
 
 
-def _proposed(shortlist: list[Classification]) -> tuple[list[Classification], int]:
-    """The comments to put in front of an editor, and how many cleared `MIN_SCORE`.
+def _proposed(
+    shortlist: list[Classification],
+    api: ApiConfig,
+) -> tuple[list[Classification], int]:
+    """The comments to put in front of an editor, and how many cleared the bar.
 
     Comments an editor has already pinned or picked are dropped here rather than
     excluded earlier, so they still appear in the calibration section below.
@@ -187,16 +165,16 @@ def _proposed(shortlist: list[Classification]) -> tuple[list[Classification], in
     which situation they are in.
     """
     fresh = [r for r in shortlist if not r.already_actioned]
-    cleared = [r for r in fresh if r.quality_score >= MIN_SCORE]
-    chosen = cleared if len(cleared) >= MIN_PROPOSED else fresh[:MIN_PROPOSED]
-    return chosen[:MAX_PROPOSED], len(cleared)
+    cleared = [r for r in fresh if r.quality_score >= api.default_min_score]
+    chosen = cleared if len(cleared) >= api.min_results else fresh[: api.min_results]
+    return chosen[: api.max_results], len(cleared)
 
 
 def _selection() -> str:
     """How the fetched comments were chosen, for the report's summary table."""
     if TOP_N_COMMENTS is None:
         return "whole thread, replies included"
-    return f"top {TOP_N_COMMENTS} by {RANKED_BY}"
+    return f"top {TOP_N_COMMENTS} by {SORTED_BY}"
 
 
 def _one_line(text: str, width: int = 160) -> str:
@@ -225,7 +203,11 @@ def _signal_line(record: Classification) -> str:
     return " · ".join(parts)
 
 
-def _score_table(record: Classification, shares: dict[str, float]) -> list[str]:
+def _score_table(
+    record: Classification,
+    shares: dict[str, float],
+    weights: Mapping[str, float],
+) -> list[str]:
     """Break one comment's score into what each answer contributed.
 
     The point is auditability: a flat list of ten numbers cannot tell you whether a
@@ -239,39 +221,39 @@ def _score_table(record: Classification, shares: dict[str, float]) -> list[str]:
             "experience",
             record.normalised("personal_experience")
             * record.noul("experience_relevant"),
-            WEIGHTS["experience"],
+            weights["experience"],
             f"{record.score('personal_experience'):.1f}/3 "
             f"x relevant {record.noul('experience_relevant'):.2f}",
         ),
         (
             "tone",
             record.normalised("tone"),
-            WEIGHTS["tone"],
+            weights["tone"],
             f"{record.score('tone'):.1f}/2",
         ),
         (
             "contribution",
             max(record.noul("proposes_solution"), record.noul("reasoned_argument")),
-            WEIGHTS["contribution"],
+            weights["contribution"],
             f"reasoned {record.noul('reasoned_argument'):.2f} / "
             f"solution {record.noul('proposes_solution'):.2f}",
         ),
         (
             "readability",
             record.normalised("readability"),
-            WEIGHTS["readability"],
+            weights["readability"],
             f"{record.score('readability'):.1f}/2",
         ),
         (
             "standalone",
             record.noul("standalone"),
-            WEIGHTS["standalone"],
+            weights["standalone"],
             "reads on its own",
         ),
         (
             "representativeness",
             stance_share,
-            WEIGHTS["representativeness"],
+            weights["representativeness"],
             f'"{record.stance}" = {stance_share:.0%} of thread',
         ),
     ]
@@ -288,34 +270,35 @@ def _score_table(record: Classification, shares: dict[str, float]) -> list[str]:
     return lines
 
 
-def _gate_line(record: Classification) -> str:
+def _gate_line(record: Classification, config: ClassificationConfig) -> str:
     """The questions that could have excluded this comment, and how close they came.
 
     Together with `_score_table` this accounts for all fourteen questions in the battery:
     eight feed the score, six are gates.
     """
+    excludes = config.exclude_at
     gates = [
-        ("on-topic", record.noul("on_topic"), f"min {ON_TOPIC_EXCLUDE_BELOW}"),
-        ("sarcasm", record.noul("sarcasm"), f"max {EXCLUDE_AT['sarcasm']}"),
+        ("on-topic", record.noul("on_topic"), f"min {config.on_topic_exclude_below}"),
+        ("sarcasm", record.noul("sarcasm"), f"max {excludes['sarcasm']}"),
         (
             "attack",
             record.noul("personal_attack"),
-            f"max {EXCLUDE_AT['personal_attack']}",
+            f"max {excludes['personal_attack']}",
         ),
         (
             "hostility",
             record.noul("group_hostility"),
-            f"max {EXCLUDE_AT['group_hostility']}",
+            f"max {excludes['group_hostility']}",
         ),
         (
             "profanity",
             record.noul("profanity_or_threat"),
-            f"max {EXCLUDE_AT['profanity_or_threat']}",
+            f"max {excludes['profanity_or_threat']}",
         ),
         (
             "unverified claims",
             record.score("unverified_claim"),
-            f"max {EXCLUDE_AT['unverified_claim']}/2",
+            f"max {excludes['unverified_claim']}/2",
         ),
     ]
     return " · ".join(f"{name} {value:.2f} ({limit})" for name, value, limit in gates)
@@ -325,10 +308,14 @@ def render_report(
     thread: ArticleThread,
     result: ClassificationResult,
     *,
+    settings: Settings,
     started: datetime,
     store: ThreadStore | None = None,
 ) -> str:
     """Build the whole Markdown report."""
+    config = settings.classification
+    api = settings.api
+    min_score = api.default_min_score
     lines: list[str] = []
     article = thread.article
     records = result.records
@@ -348,7 +335,7 @@ def render_report(
         f"| Container | `{thread.container_uuid}` |",
         f"| Run | {started:%Y-%m-%d %H:%M} UTC{_run_history(store)} |",
         f"| Model | `{result.model}` |",
-        f"| Article body sent | {min(article.body_word_count, ARTICLE_MAX_WORDS)} of {article.body_word_count} words |",
+        f"| Article body sent | {min(article.body_word_count, settings.article.max_words)} of {article.body_word_count} words |",
         f"| Comments fetched | {len(records)} ({_selection()}) |",
         f"| Skipped before Jev | {len(skipped)} |",
         f"| Classified | {sum(r.classified for r in records)} "
@@ -386,16 +373,16 @@ def render_report(
             "",
         ]
 
-    weights = ", ".join(f"{k} {v:.0%}" for k, v in WEIGHTS.items())
-    lines += [f"Score weights: {weights}.", ""]
+    summary = ", ".join(f"{k} {v:.0%}" for k, v in config.weights.items())
+    lines += [f"Score weights: {summary}.", ""]
 
     # ---- shortlist
-    proposed, cleared = _proposed(shortlist)
+    proposed, cleared = _proposed(shortlist, api)
     if cleared >= len(proposed):
-        heading = f"## Proposed ({len(proposed)} scoring {MIN_SCORE:.2f} or above)"
+        heading = f"## Proposed ({len(proposed)} scoring {min_score:.2f} or above)"
     else:
         heading = (
-            f"## Proposed ({len(proposed)}: only {cleared} scored {MIN_SCORE:.2f} "
+            f"## Proposed ({len(proposed)}: only {cleared} scored {min_score:.2f} "
             f"or above, so the next best are shown too)"
         )
     lines += [heading, ""]
@@ -406,7 +393,7 @@ def render_report(
         eligibility = (
             "pin or carousel" if record.pin_eligible else "carousel only (reply)"
         )
-        below = "" if record.quality_score >= MIN_SCORE else f" — below {MIN_SCORE:.2f}"
+        below = "" if record.quality_score >= min_score else f" — below {min_score:.2f}"
         lines += [
             f"### {rank}. Score {record.quality_score:.3f}{below} — {eligibility}",
             "",
@@ -420,8 +407,8 @@ def render_report(
             "",
         ]
         lines += ["> " + line for line in _quote(comment.text)]
-        lines += ["", *_score_table(record, result.shares), ""]
-        lines += [f"**Gates passed:** {_gate_line(record)}", ""]
+        lines += ["", *_score_table(record, result.shares, config.weights), ""]
+        lines += [f"**Gates passed:** {_gate_line(record, config)}", ""]
         if record.flags:
             lines += [f"**Flagged:** {', '.join(record.flags)}", ""]
 
@@ -447,10 +434,10 @@ def render_report(
         for record in sorted(actioned, key=lambda r: r.quality_score, reverse=True):
             if record.excluded_reason:
                 verdict = f"**excluded**: {record.excluded_reason}"
-            elif record.quality_score >= MIN_SCORE:
+            elif record.quality_score >= min_score:
                 verdict = "would propose"
             else:
-                verdict = f"below {MIN_SCORE:.2f}"
+                verdict = f"below {min_score:.2f}"
             lines.append(
                 f"| {record.quality_score:.3f} | {verdict} | `{record.comment.uuid}` | "
                 f"{_cell(record.comment.text)} |",
@@ -499,12 +486,13 @@ def render_report(
         lines += [f"| {r.error} | {_cell(r.comment.text)} |" for r in failed]
         lines.append("")
 
-    thresholds = ", ".join(f"{k} ≥ {v}" for k, v in EXCLUDE_AT.items())
+    thresholds = ", ".join(f"{k} ≥ {v}" for k, v in config.exclude_at.items())
     lines += [
         "---",
         "",
-        f"Exclusion thresholds: {thresholds}, on_topic < 0.35. "
-        "Edit them in `processing/classification.py`; edit the question wording in "
+        f"Exclusion thresholds: {thresholds}, "
+        f"on_topic < {config.on_topic_exclude_below}. "
+        "Edit them in `config.toml`; edit the question wording in "
         "`processing/questions.py`.",
         "",
     ]
@@ -542,7 +530,13 @@ async def main(article_ref: str) -> None:
 
     thread, result, store = await run(article_ref, settings)
 
-    report = render_report(thread, result, started=started, store=store)
+    report = render_report(
+        thread,
+        result,
+        settings=settings,
+        started=started,
+        store=store,
+    )
     # One report per article, rewritten in place. A timestamped name per run left a pile
     # of near-identical files and no obvious current one; the run history is in the
     # report itself instead.
@@ -551,7 +545,11 @@ async def main(article_ref: str) -> None:
     # validate the same value first — which is an accident, not a guarantee.
     name = f"classification_{safe_key(thread.container_uuid)}.md"
     # A small synchronous write, off the event loop, after every request has finished.
-    path = await asyncio.to_thread(_write_report, report, OUTPUT_DIR / name)
+    path = await asyncio.to_thread(
+        _write_report,
+        report,
+        settings.paths.output_dir / name,
+    )
 
     shortlist = result.shortlist
     logger.info(

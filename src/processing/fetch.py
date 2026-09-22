@@ -13,7 +13,7 @@ from urllib.parse import urlsplit, urlunsplit
 import aiohttp
 
 from clients.capi import get_ucms
-from clients.vf_mcp import Comment, RankedBy, ViafouraMCPClient
+from clients.viafoura import Comment, SortOrder, ViafouraClient
 from processing.log_config import logger
 from processing.settings import Settings
 
@@ -134,33 +134,33 @@ async def fetch_article(
 
 
 async def fetch_comments(
-    vf: ViafouraMCPClient,
+    vf: ViafouraClient,
     article_ref: str,
     limit: int | None,
-    ranked_by: RankedBy = "most_liked",
+    sorted_by: SortOrder = "num_likes_desc",
 ) -> list[Comment]:
     """Fetch the top ``limit`` comments for an article, or every comment when ``None``.
 
     ``article_ref`` is a URL, a Telegraph page id, or a Viafoura container UUID.
 
     The two modes return different populations, not just different counts: ``limit=N``
-    gives the top N *top-level* comments ranked by ``ranked_by``, while ``None`` pages
+    gives the first N *top-level* comments in ``sorted_by`` order, while ``None`` pages
     the whole thread and includes replies. Replies are classified like any other comment
     — `standalone` and the parent text in the state exist for exactly that case.
     """
-    comments = await vf.get_comments(article_ref, limit=limit, ranked_by=ranked_by)
+    comments = await vf.get_comments(article_ref, limit=limit, sorted_by=sorted_by)
     logger.info("Fetched %d comments for %s", len(comments), article_ref)
     return comments
 
 
 async def fetch_thread(
     *,
-    vf: ViafouraMCPClient,
+    vf: ViafouraClient,
     session: aiohttp.ClientSession,
     settings: Settings,
     article_ref: str,
     limit: int | None,
-    ranked_by: RankedBy = "most_liked",
+    sorted_by: SortOrder = "num_likes_desc",
 ) -> ArticleThread:
     """Fetch an article and its comments.
 
@@ -186,11 +186,11 @@ async def fetch_thread(
                 "reading the article page: that is scraping, and it fails on every "
                 "paywalled article anyway. Pass the page id or container UUID directly.",
             )
-        comments = await fetch_comments(vf, article.page_id, limit, ranked_by)
+        comments = await fetch_comments(vf, article.page_id, limit, sorted_by)
         container_ref = article.page_id
     else:
         container_ref = article_ref
-        comments = await fetch_comments(vf, article_ref, limit, ranked_by)
+        comments = await fetch_comments(vf, article_ref, limit, sorted_by)
         if not comments:
             raise ArticleNotFoundError(
                 f"No comments found for {article_ref!r}, so the article URL is unknown. "

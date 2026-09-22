@@ -107,7 +107,7 @@ not a request for the HTML.
   and the cache is discarded rather than silently misranking the thread. A run holds an
   exclusive lock on the article, because two concurrent runs would double-spend and one
   would lose its answers. See the module docstring and
-  `.claude/incremental-classification-spec.md`.
+  `.claude/comment-classification-spec.md` (Part II).
 - `output/`: reports, one per article, rewritten in place; disposable.
 - `state/`: the store. **Not** disposable — deleting it means paying Jev again for every
   comment. Gitignored.

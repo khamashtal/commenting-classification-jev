@@ -21,8 +21,8 @@ state intact rather than a truncated file.
 The limits of this shape, and what replaces it: there is no protection against two runs
 on the same article at once (the second would clobber the first), and the whole map is
 read into memory. At roughly 1 KB a comment that is fine for a POC. SQLite is the
-migration when the pipeline polls many articles in parallel; see
-`.claude/incremental-classification-spec.md`.
+migration when the pipeline polls many articles in parallel; see Part II of
+`.claude/comment-classification-spec.md`.
 """
 
 from __future__ import annotations

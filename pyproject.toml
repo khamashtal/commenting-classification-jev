@@ -7,12 +7,15 @@ requires-python = ">=3.12"
 dependencies = [
     "aiohttp>=3.14.3",
     "mcp>=2.2.0",
+    "msgspec>=0.21.1",
     "python-dotenv>=1.2.3",
     "typesafe-sdk>=0.6.0",
 ]
 
 [dependency-groups]
 dev = [
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
     "ruff>=0.16.8",
 ]
 
@@ -24,3 +27,13 @@ build-backend = "hatchling.build"
 # Installs `clients` and `processing` into the venv (editable, pointing back at src/),
 # so imports resolve from any working directory without PYTHONPATH.
 packages = ["src/clients", "src/processing"]
+
+[tool.pytest.ini_options]
+# `src` on the path so tests import the same way the modules do.
+pythonpath = ["src"]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+addopts = "-q --strict-markers"
+markers = [
+    "live: hits a real external service. Deselected by default; run with -m live.",
+]

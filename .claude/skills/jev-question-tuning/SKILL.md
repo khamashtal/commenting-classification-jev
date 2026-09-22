@@ -71,7 +71,7 @@ same field names on every option so the model compares like with like. The field
 yours; `what`, `not_for` and `examples` are the convention in this battery.
 
 ```python
-criteria=NoulCriteria(
+criteria = NoulCriteria(
     true={
         "what": "Asks the recipient to disclose a password, PIN or one-time code",
         "examples": ["Reply with your password"],

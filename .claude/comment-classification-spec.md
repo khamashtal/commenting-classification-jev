@@ -69,8 +69,9 @@ class Settings:
     vf_section_uuid: str | None
     environment: str = "dev"
 
-def load_settings() -> Settings: ...   # reads .env once, validates, caches
-def get_settings() -> Settings: ...    # returns the cached instance
+
+def load_settings() -> Settings: ...  # reads .env once, validates, caches
+def get_settings() -> Settings: ...  # returns the cached instance
 ```
 
 - `load_settings()` calls `load_dotenv()` once, reads the variables, **fails fast naming

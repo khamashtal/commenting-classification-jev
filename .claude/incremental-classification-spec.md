@@ -1,7 +1,17 @@
 # Incremental classification
 
-Status: **proposed, not built.** Written 2026-09-21. Extends
-`.claude/comment-classification-spec.md`; read that first.
+Status: **built 2026-09-22** in `processing/store.py`, wired into `classify_thread` and
+`workflow.run`. Written 2026-09-21. Extends `.claude/comment-classification-spec.md`;
+read that first.
+
+**One thing changed in the building, and it made this simpler.** The plan was to fetch
+only comments newer than a watermark. In practice the pipeline fetches the current thread
+every run and skips the uuids it already has, which needs *no cursor at all*: Viafoura is
+free and Jev is what bills, so there is nothing to save by fetching less. That removes the
+out-of-order moderation problem entirely rather than working around it with an overlap
+window, and it means a run always reports on the whole thread rather than a slice of it.
+`last_run_at` is still recorded, for the report's run counter, and is never read as a
+cursor. Open question 4 below is therefore closed: there is no overlap window to tune.
 
 ## Why
 
@@ -29,13 +39,13 @@ One store, and a split in `classify_thread` so the paid half and the free half c
 independently.
 
 ```
-run(article, since) ->
-    1. fetch comments newer than the watermark, minus an overlap window
+run(article) ->
+    1. fetch the current thread (free)
     2. drop any uuid already in the store          <- prevents double-paying
     3. Jev the remainder, write answers to the store
-    4. recompute stance_shares over ALL stored answers for this container
-    5. recompute quality_score for ALL comments, in code, no API calls
-    6. rank, render, advance the watermark
+    4. re-apply thresholds to every comment, restored ones included
+    5. recompute stance_shares and quality_score for ALL comments, in code, no API calls
+    6. rank, render into the article's one report file
 ```
 
 Step 5 is what keeps every comment's score current as the thread's stance mix moves,
@@ -68,11 +78,11 @@ Whichever backing store is used, one record per classified comment:
 | `container_uuid` | Which article's thread. |
 | `comment_uuid` | The key. Also the handle an editor pastes into the Viafoura UI. |
 | `answers` | The raw Jev answer dict. |
-| `model` | The version that answered. |
+| `model` | The version that answered *this* comment, not the run's cumulative set. |
 | `created_at` | The comment's own timestamp, ISO 8601, UTC. |
 | `classified_at` | When this row was written. |
 
-Plus one watermark per container: `last_seen_at` (the newest comment's own `created_at`,
+Plus, per container, the `fingerprint` described above and: `last_seen_at` (the newest comment's own `created_at`,
 **not** wall-clock, so a slow run cannot skip comments posted while it was working) and
 `last_run_at`.
 
@@ -108,9 +118,24 @@ corrupt file costs one thread rather than all of them. Write to a temporary file
 same directory and `os.replace` it, which is atomic on POSIX — a crash mid-write then
 leaves the previous run's state intact rather than a truncated file.
 
-What this does **not** give you, and why it is fine for now: no concurrent writers (two
-runs on the same article would clobber each other — don't do that yet), and the whole map
-is loaded into memory (~1 KB per comment, so a 1,000-comment thread is ~1 MB — fine).
+Two gaps in the plan were closed during the build, after the `pipeline-qa` agent found
+both:
+
+- **Concurrent runs are now locked.** `os.replace` makes the write atomic and does
+  nothing for the read-modify-write around it: two runs on one article both loaded the
+  same snapshot, both paid Jev for the same comments, and the second save erased the
+  first's answers. `store.locked()` takes an `O_EXCL` lock per container and refuses
+  rather than queues; a lock left by a killed process is broken after 30 minutes.
+- **The cache key is the uuid *and* a fingerprint** of the battery plus
+  `ARTICLE_MAX_WORDS`. The comment text is immutable, which is what makes caching sound,
+  but the questions and the article extract are not. Reusing an answer across a tuning
+  change is worse than wrong: `noul()` and `score()` return 0.0 for a missing key, so a
+  renamed question would quietly drag every cached comment down the ranking with nothing
+  in the report to show it. A fingerprint mismatch discards the file and re-bills, which
+  is the correct price.
+
+Still true: the whole map is read into memory (~0.7 KB per comment, so a 1,000-comment
+thread is under a megabyte) and rewritten in full every run.
 
 ### For production: SQLite
 
@@ -183,8 +208,7 @@ replies?") is a proxy for `proposes_solution`, which Jev is already asked direct
 3. **Store growth.** ~1 KB per comment. A year of Telegraph volume is worth estimating
    before it is a surprise — and it is one of the triggers for the move to SQLite, since
    the JSON version reads the whole map into memory on every run.
-4. **Overlap window.** One hour is a guess. The right value is the longest realistic
-   moderation delay, which the Community Moderation team can answer.
+4. ~~**Overlap window.**~~ Closed: there is no watermark, so there is no window.
 
 ## Cost
 

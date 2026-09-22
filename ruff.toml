@@ -98,6 +98,19 @@ ignore = [
     "PLR0913",  # Too many arguments in function definition ({c_args} > {max_args})
 ]
 
+[lint.per-file-ignores]
+# Tests are held to the same standard as the code, with a few exceptions that are
+# artefacts of the test framework rather than lapses in quality.
+"tests/**" = [
+    "S101",    # `assert` is how a test asserts.
+    "ANN001",  # pytest fixtures are injected by name; annotating them adds nothing.
+    "ANN401",  # fakes take whatever shape the real object takes, which is `Any`.
+    "ARG002",  # a fake must accept the real signature even where it ignores an argument.
+    "FBT001",  # a parametrised boolean is a test case, not a flag argument.
+    "SLF001",  # tests may reach into private state to assert on it.
+    "PLR2004", # expected values in assertions are the point, not magic numbers.
+]
+
 # --- Docstring Convention Configuration ---
 # This new section `[lint.pydocstyle]` is how you configure rules specific to the "D" category.
 # It corresponds to `[tool.ruff.lint.pydocstyle]` in pyproject.toml.

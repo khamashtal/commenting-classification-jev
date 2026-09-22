@@ -59,12 +59,15 @@ do not treat "that's done" or a clean lint run as permission to.
 Reading history is fine and encouraged: `git log`, `git show`, `git diff`, `git status`,
 `git blame`, `git ls-files`, `git check-ignore`.
 
-Never run anything that writes — no `commit`, `add`/stage, `push`, `pull`, `fetch`,
-`merge`, `rebase`, `cherry-pick`, `revert`, `reset`, `restore`, `checkout`/`switch`,
-`branch`, `tag`, `stash`, `clean`, `worktree`, `git config`, and no `gh pr create`/`merge`
-or any other command that writes to the remote. This includes discarding work: to undo an
-edit, edit the file back, and if that is not practical, say so and let Luis decide rather
-than reaching for `git checkout --` or `git reset`.
+**The enforcement lives in `.claude/settings.json`**, which denies every writing git and
+`gh` command outright, so the full list is not repeated here. This section states the
+intent, because a rule that exists only as a permission denial is invisible to anyone
+reading the code, and because the denial only binds this harness — the intent binds
+wherever this file is read.
+
+One case the deny list cannot express: discarding work. To undo an edit, edit the file
+back. If that is not practical, say so and let Luis decide rather than reaching for
+`git checkout --` or `git reset`.
 
 ## Never scrape a page
 
@@ -97,7 +100,18 @@ not a request for the HTML.
   then `await jev.ask(state, questions)`. It knows nothing about comments: the battery,
   the thresholds and the weights stay in `processing/`.
 - `experiment_1.py` (root): TypeSafe experiment (Jev Choice question over persona data).
-- `output/`: JSON dumps written by the harness; disposable.
+- `src/processing/store.py`: what survives between runs — one JSON file per article
+  holding each comment's Jev answers, keyed by comment uuid, so a second run pays only
+  for comments it has never seen. There is deliberately no timestamp cursor. The file
+  also carries a fingerprint of the battery and `ARTICLE_MAX_WORDS`: change a question
+  and the cache is discarded rather than silently misranking the thread. A run holds an
+  exclusive lock on the article, because two concurrent runs would double-spend and one
+  would lose its answers. See the module docstring and
+  `.claude/incremental-classification-spec.md`.
+- `output/`: reports, one per article, rewritten in place; disposable.
+- `state/`: the store. **Not** disposable — deleting it means paying Jev again for every
+  comment. Gitignored.
+- `tests/`: the suite. No Jev calls, ever.
 - Add new modules under `src/`; import as `from clients.vf_mcp import …`. `pyproject.toml`
   installs `src/clients` and `src/processing` into the venv as editable packages, so imports
   resolve regardless of the working directory. A new top-level package under `src/` must be
@@ -139,9 +153,24 @@ not a request for the HTML.
 - Combine answers in code with explicit weights; exclude on high-probability negatives
   (sarcasm, guideline breaches, off-site URLs); route the uncertain band to editors.
 
+## Tests
+
+`tests/`, run with `uv run pytest`. Around 115 tests, under four seconds, and **no test
+ever calls Jev** — every interaction goes through `FakeJev` in `tests/conftest.py`. A test
+that would reach the API is a defect, not a slow test; `tests/test_guards.py` enforces
+that, along with the project's other standing decisions (no scraping, no `os.environ`
+outside `settings.py`, no blocking calls in async functions, no unbounded fan-out).
+
+Run the suite after every change. The `pipeline-qa` agent runs it and reviews the diff
+for correctness, async hygiene, security, performance and test quality; use it before
+calling any change done.
+
+Live services are still exercised by hand for the fetch stage; those checks are marked
+`@pytest.mark.live` and deselected by default.
+
 ## Working style
 
 - Analysis and design in chat first, code when asked. Keep changes scoped to the request.
-- Test against the live services with small limits (e.g. `max_pages=2`); there are no
-  unit tests yet. Scratch scripts go in the session scratchpad, not the repo.
+- Run `uv run pytest` and both ruff commands before finishing. Scratch scripts go in the
+  session scratchpad, not the repo.
 - Report honestly: if a live call fails or a check was skipped, say so.

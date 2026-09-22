@@ -162,3 +162,7 @@ infrastructure/terraform/environments/prod/vars.tfvars
 local*
 *.log
 output/
+
+# What the pipeline remembers between runs. Not disposable like output/ — losing it
+# means paying Jev again for every comment — but machine-local, not source.
+state/

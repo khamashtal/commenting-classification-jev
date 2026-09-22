@@ -65,6 +65,6 @@ These are listed in §13 of `.claude/comment-classification-spec.md` and are sti
 | Audience segments (Advocate / Traditionalist / Curator) | Luis's call. Needs written segment definitions with example comments before Jev can classify against them. |
 | Commenter usernames | The Viafoura MCP server returns an anonymous `actor_uuid` only. The brief needs usernames, so this needs another source. |
 | Viafoura's moderation word list | Not obtained. It would become a code-side hard filter, not a Jev question. |
-| Batching several comments per Jev request | One comment per request is the accurate baseline. Batch only after measuring against it. |
+| Batching several comments per Jev request | Investigated and declined 2026-09-21: ~25% token saving, against a documented accuracy risk (Jev's jaggedness page, "large state full of irrelevant detail"). Revisit above ~10,000 comments per article. |
 | FastAPI service | The code is shaped for it (see `decision-log.md`), but nothing is built. |
 | Auto-pinning or publishing | Explicitly out of scope in the brief. |

@@ -12,11 +12,13 @@ policy is a number under review rather than a reworded question.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import re
 from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any
 
+import msgspec
 from typesafe_sdk import SystemOneResponse
 
 from clients.jev import JevClient, Spend
@@ -31,6 +33,7 @@ from processing.questions import (
     build_state,
     top_level,
 )
+from processing.store import ThreadStore
 
 # ------------------------------------------------------------------- code-side policy
 
@@ -102,6 +105,8 @@ class Classification:
     flags: list[str] = field(default_factory=list)
     quality_score: float = 0.0
     error: str | None = None
+    model: str = ""
+    """The model version that answered this comment, not the run's cumulative set."""
 
     @property
     def classified(self) -> bool:
@@ -224,6 +229,7 @@ async def _classify_one(
     thread: ArticleThread,
     article_body: str,
     parent_text: dict[str, str],
+    store: ThreadStore | None,
 ) -> None:
     """Send one comment's battery and store the answers on ``record``.
 
@@ -239,11 +245,24 @@ async def _classify_one(
     )
     try:
         response = await client.ask(state, BATTERY)
+        # Parsing is inside the try on purpose. A response missing a question id raises
+        # KeyError here, and outside the try that escaped `asyncio.gather` and aborted
+        # the whole run — discarding every answer already bought. One malformed
+        # response must cost one comment, exactly like a failed call.
+        answers = _read_answers(response)
     except Exception as exc:  # noqa: BLE001 - one bad comment must not kill the run
         record.error = f"{type(exc).__name__}: {exc}"
         logger.warning("Jev failed for %s: %s", record.comment.uuid, record.error)
         return
-    record.answers = _read_answers(response)
+    record.answers = answers
+    # The version that answered *this* comment. Taking it from the client's cumulative
+    # set would label every later comment with every version the client had ever seen.
+    record.model = response.model
+    # Remembered here rather than in a loop after the gather: an answer is paid for the
+    # moment it arrives, so it must be recorded the moment it arrives. Batching this at
+    # the end meant a Ctrl-C partway through discarded everything bought so far.
+    if store is not None:
+        store.remember(record.comment.uuid, answers, response.model)
 
 
 # ----------------------------------------------------------------- verdict and ranking
@@ -313,6 +332,34 @@ def quality_score(record: Classification, shares: dict[str, float]) -> float:
     )
 
 
+# ------------------------------------------------------------------- cache fingerprint
+
+
+def battery_fingerprint(article_max_words: int) -> str:
+    """Identifies the inputs a stored answer was computed against.
+
+    A comment's *text* is immutable, which is why answers can be cached at all. The rest
+    of the state is not: retune a question, rename one, add one, or change how much
+    article body is sent, and a stored answer no longer means what a fresh one means.
+
+    Reusing it then is worse than wrong. `Classification.noul()` and `score()` return
+    0.0 for a missing key, so a renamed question would quietly drag every cached comment
+    down the ranking with no error and nothing in the report to show it.
+
+    So the store records this fingerprint and discards everything when it changes. The
+    cost is re-billing a thread after a tuning change, which is the correct price: the
+    alternative is a report that is subtly wrong and says nothing about it.
+    """
+    material = msgspec.json.encode(
+        {
+            "questions": sorted(BATTERY),
+            "battery": msgspec.json.encode(BATTERY).decode(),
+            "article_max_words": article_max_words,
+        },
+    )
+    return hashlib.sha256(material).hexdigest()[:16]
+
+
 # ------------------------------------------------------------------------ entry point
 
 
@@ -324,6 +371,16 @@ class ClassificationResult:
     shares: dict[str, float]
     spend: Spend
     """What this run cost and which model version answered, from the client."""
+    newly_classified: int = 0
+    """Comments sent to Jev this run."""
+    reused: int = 0
+    """Comments whose answers came from the store, costing nothing."""
+    restored_models: frozenset[str] = frozenset()
+    """Model versions recorded against the answers restored from the store.
+
+    Without this a run that reused everything would report no model at all, because
+    `Spend` only knows about requests this run actually made.
+    """
 
     @property
     def shortlist(self) -> list[Classification]:
@@ -345,8 +402,14 @@ class ClassificationResult:
 
     @property
     def model(self) -> str:
-        """The model version that answered, read back from the responses."""
-        return self.spend.model
+        """Every model version behind this report, whenever it answered.
+
+        Answers restored from the store were bought on an earlier run, so the versions
+        that produced them belong here too — otherwise a fully cached run would claim no
+        model at all, and a run spanning a version change would name only the new one.
+        """
+        seen = self.spend.models | self.restored_models
+        return ", ".join(sorted(seen)) or "no successful requests"
 
 
 async def classify_thread(
@@ -354,6 +417,7 @@ async def classify_thread(
     client: JevClient,
     thread: ArticleThread,
     article_max_words: int,
+    store: ThreadStore | None = None,
 ) -> ClassificationResult:
     """Run the whole classification stage over one article's comments.
 
@@ -373,12 +437,34 @@ async def classify_thread(
         if reason:
             record.excluded_reason = reason
 
-    to_classify = [r for r in records if r.excluded_reason is None]
+    eligible = [r for r in records if r.excluded_reason is None]
+
+    # Answers already held are restored rather than bought again. This is the whole
+    # saving: a comment's answers cannot change, so a second run pays only for what is
+    # genuinely new.
+    reused = 0
+    restored_models: set[str] = set()
+    to_classify: list[Classification] = []
+    for record in eligible:
+        remembered = store.get(record.comment.uuid) if store else None
+        if remembered is not None:
+            record.answers = dict(remembered.answers)
+            # Set on the record too, not just collected for the run-level total: a
+            # restored comment knows which version answered it, and leaving the field
+            # empty is a trap for whatever reads it next.
+            record.model = remembered.model
+            restored_models.add(remembered.model)
+            reused += 1
+        else:
+            to_classify.append(record)
+
     logger.info(
-        "Classifying %d of %d comments (%d skipped by code-side rules)",
-        len(to_classify),
+        "%d comments: %d skipped by code-side rules, %d already classified, "
+        "%d to send to Jev",
         len(records),
-        len(records) - len(to_classify),
+        len(records) - len(eligible),
+        reused,
+        len(to_classify),
     )
 
     before = client.spent()
@@ -390,12 +476,15 @@ async def classify_thread(
                 thread=thread,
                 article_body=article_body,
                 parent_text=parent_text,
+                store=store,
             )
             for record in to_classify
         ),
     )
 
-    for record in to_classify:
+    # Thresholds are re-derived every run, including for restored answers, so a change
+    # to EXCLUDE_AT or FLAG_AT takes effect on the whole thread without re-billing.
+    for record in eligible:
         apply_thresholds(record)
 
     shares = stance_shares(records)
@@ -407,4 +496,7 @@ async def classify_thread(
         records=records,
         shares=shares,
         spend=client.since(before),
+        newly_classified=len(to_classify),
+        reused=reused,
+        restored_models=frozenset(restored_models),
     )

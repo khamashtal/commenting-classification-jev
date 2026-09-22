@@ -191,7 +191,7 @@ async def main() -> int:
 
     cost = total_tokens * 0.042 / 1_000_000
     print(
-        f"{len(comments)} comment(s), {total_tokens:,} input tokens, about ${cost:.5f}"
+        f"{len(comments)} comment(s), {total_tokens:,} input tokens, about ${cost:.5f}",
     )
     return 0
 

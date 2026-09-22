@@ -33,11 +33,20 @@ from processing.classification import (
     WEIGHTS,
     Classification,
     ClassificationResult,
+    battery_fingerprint,
     classify_thread,
 )
 from processing.fetch import ArticleThread, fetch_thread
 from processing.log_config import logger
 from processing.settings import Settings, load_settings
+from processing.store import (
+    ThreadStore,
+    load_store,
+    locked_async,
+    safe_key,
+    save_store,
+    sweep_temp_files,
+)
 
 # --------------------------------------------------------------------------- run config
 
@@ -93,6 +102,9 @@ MODEL: str | None = None
 # Where the report goes. Anchored to the project root, not the working directory, so
 # the path is the same whether the script is run from the root or from this folder.
 OUTPUT_DIR = Path(__file__).resolve().parents[2] / "output"
+# What the pipeline remembers between runs, so a second run pays only for new comments.
+# Not in `output/`, which is disposable — losing this costs money, not just a re-render.
+STATE_DIR = Path(__file__).resolve().parents[2] / "state"
 
 
 # ------------------------------------------------------------------------- the pipeline
@@ -101,8 +113,8 @@ OUTPUT_DIR = Path(__file__).resolve().parents[2] / "output"
 async def run(
     article_ref: str,
     settings: Settings,
-) -> tuple[ArticleThread, ClassificationResult]:
-    """Fetch and classify. Owns every client for the duration of the run."""
+) -> tuple[ArticleThread, ClassificationResult, ThreadStore]:
+    """Fetch and classify. Owns every client and the store for the duration of the run."""
     async with (
         aiohttp.ClientSession() as session,
         ViafouraMCPClient(settings.viafoura_api_key) as vf,
@@ -121,15 +133,46 @@ async def run(
             limit=TOP_N_COMMENTS,
             ranked_by=RANKED_BY,
         )
-        result = await classify_thread(
-            client=jev,
-            thread=thread,
-            article_max_words=ARTICLE_MAX_WORDS,
-        )
-    return thread, result
+        # The lock makes the read-modify-write around the store safe: without it two
+        # runs on one article both pay for the same comments and one set of answers is
+        # lost. The fingerprint stops a tuning change reusing answers computed against
+        # the old questions.
+        async with locked_async(thread.container_uuid, STATE_DIR):
+            await asyncio.to_thread(sweep_temp_files, STATE_DIR)
+            store = await asyncio.to_thread(
+                load_store,
+                thread.container_uuid,
+                STATE_DIR,
+                battery_fingerprint(ARTICLE_MAX_WORDS),
+            )
+            # So a person opening state/<uuid>.json can tell what it is.
+            store.describe(url=thread.article.url, headline=thread.article.headline)
+            try:
+                result = await classify_thread(
+                    client=jev,
+                    thread=thread,
+                    article_max_words=ARTICLE_MAX_WORDS,
+                    store=store,
+                )
+            finally:
+                # In `finally` because this is the one moment the store matters: a
+                # Ctrl-C or an error partway through a long run would otherwise discard
+                # every answer already paid for. `classify_thread` records each answer
+                # as it arrives, so whatever was bought before the interruption is kept.
+                store.note_run()
+                await asyncio.to_thread(save_store, store, STATE_DIR)
+    return thread, result, store
 
 
 # ----------------------------------------------------------------------------- the report
+
+
+def _run_history(store: ThreadStore | None) -> str:
+    """How many times this article has been through the pipeline, for the header."""
+    if store is None or store.runs <= 1:
+        return ""
+    first = store.first_run_at[:16].replace("T", " ")
+    return f" · run {store.runs}, first seen {first} UTC"
 
 
 def _proposed(shortlist: list[Classification]) -> tuple[list[Classification], int]:
@@ -283,6 +326,7 @@ def render_report(
     result: ClassificationResult,
     *,
     started: datetime,
+    store: ThreadStore | None = None,
 ) -> str:
     """Build the whole Markdown report."""
     lines: list[str] = []
@@ -302,12 +346,13 @@ def render_report(
         "| | |",
         "| --- | --- |",
         f"| Container | `{thread.container_uuid}` |",
-        f"| Run | {started:%Y-%m-%d %H:%M} UTC |",
+        f"| Run | {started:%Y-%m-%d %H:%M} UTC{_run_history(store)} |",
         f"| Model | `{result.model}` |",
         f"| Article body sent | {min(article.body_word_count, ARTICLE_MAX_WORDS)} of {article.body_word_count} words |",
         f"| Comments fetched | {len(records)} ({_selection()}) |",
         f"| Skipped before Jev | {len(skipped)} |",
-        f"| Classified | {sum(r.classified for r in records)} |",
+        f"| Classified | {sum(r.classified for r in records)} "
+        f"({result.newly_classified} new this run, {result.reused} reused) |",
         f"| Excluded by Jev | {len(excluded) - len(skipped)} |",
         f"| Flagged for review | {len(flagged)} |",
         f"| Shortlisted | {len(shortlist)} |",
@@ -495,18 +540,26 @@ async def main(article_ref: str) -> None:
     started = datetime.now(UTC)
     settings = load_settings()
 
-    thread, result = await run(article_ref, settings)
+    thread, result, store = await run(article_ref, settings)
 
-    report = render_report(thread, result, started=started)
-    name = f"classification_{thread.container_uuid}_{started:%Y%m%d-%H%M}.md"
+    report = render_report(thread, result, started=started, store=store)
+    # One report per article, rewritten in place. A timestamped name per run left a pile
+    # of near-identical files and no obvious current one; the run history is in the
+    # report itself instead.
+    # Validated rather than trusted: this becomes a filename, and `_write_report`
+    # creates parent directories. Safe today only because `store_path` happens to
+    # validate the same value first — which is an accident, not a guarantee.
+    name = f"classification_{safe_key(thread.container_uuid)}.md"
     # A small synchronous write, off the event loop, after every request has finished.
     path = await asyncio.to_thread(_write_report, report, OUTPUT_DIR / name)
 
     shortlist = result.shortlist
     logger.info(
-        "Classified %d comments: %d shortlisted, %d flagged, %d excluded. "
-        "%d input tokens, about $%.4f.",
+        "%d comments classified (%d new, %d reused from the store): %d shortlisted, "
+        "%d flagged, %d excluded. %d input tokens, about $%.4f.",
         sum(r.classified for r in result.records),
+        result.newly_classified,
+        result.reused,
         len(shortlist),
         len(result.flagged),
         len(result.excluded),

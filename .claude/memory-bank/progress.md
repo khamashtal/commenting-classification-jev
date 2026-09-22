@@ -47,9 +47,35 @@ Reports are in `output/`, named `classification_<container_uuid>_<timestamp>.md`
 - Audience segments.
 - Usernames (needs a source other than the MCP server).
 - Viafoura's moderation word list as a hard filter.
-- Batching comments per Jev request.
+- Batching comments per Jev request. Investigated 2026-09-21 and **declined**: the
+  saving is ~25% of tokens, not the docs' 12x, because the battery is 2.5x the article
+  and repeats per comment inside a batch. Against that, Jev's own jaggedness page warns
+  accuracy falls as the state fills with irrelevant detail — which the other comments in
+  a batch are. Revisit above ~10,000 comments per article, where the 20 req/s cap starts
+  to bind.
 - FastAPI service. The code is shaped for it but nothing is written.
-- Any test suite. There are no unit tests; verification so far is live runs.
+
+## Built 2026-09-22
+
+- **Incremental classification.** `processing/store.py` keeps each comment's Jev answers
+  in `state/<container>.json`, keyed by comment uuid. A second run pays only for comments
+  it has never seen: a 1,000-comment thread polled every five minutes costs $0.13 a day
+  rather than $38. There is no timestamp cursor, deliberately — see the module docstring.
+- **Reports are rewritten in place**, one per article, rather than a new timestamped file
+  per run. The run counter is in the report header.
+- **`clients/jev.py`.** The Jev calls moved behind a client alongside `vf_mcp` and `capi`,
+  taking the rate limiting, concurrency bound, retry policy and usage accounting with
+  them. `classify_thread` lost six parameters in the process.
+- **Rate limiting.** Dual token buckets against both published limits, halving on an
+  observed 429 and recovering on a clean streak. A semaphore alone could not do this: it
+  bounds requests in flight, not rate, and those only coincide at one latency.
+- **No page is ever fetched.** The Viafoura container id comes from CAPI's
+  `metadata.page-id`; scraping returned HTTP 402 on every premium article. The scraping
+  code is deleted, not disabled.
+- **A test suite**, `tests/`, ~115 tests in under four seconds, none of which call Jev.
+  `tests/test_guards.py` enforces the standing decisions above as executable rules.
+- **A `pipeline-qa` agent** that runs the suite and reviews a diff for correctness, async
+  hygiene, security, performance and test quality.
 
 ## Where the documentation lives
 

@@ -343,7 +343,10 @@ class JevClient:
         Measuring the real payload means a long article or an extra question is charged
         for what it is, so the token bucket stays accurate as the battery is tuned.
         """
-        encoded = len(msgspec.json.encode(state)) + len(msgspec.json.encode(questions))
+        # The SDK's question types are pydantic models (since typesafe-sdk 0.7), which
+        # msgspec cannot encode directly.
+        dumped = {qid: q.model_dump(mode="json") for qid, q in questions.items()}
+        encoded = len(msgspec.json.encode(state)) + len(msgspec.json.encode(dumped))
         return encoded // _CHARS_PER_TOKEN
 
     def spent(self) -> Spend:

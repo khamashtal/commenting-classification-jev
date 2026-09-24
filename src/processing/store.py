@@ -35,7 +35,7 @@ import tempfile
 import time
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager, contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -77,9 +77,15 @@ class StoredAnswers:
     answers: dict[str, Any]
     model: str
     classified_at: str
+    text: str = ""
+    """The comment text that was classified. Recorded so a person reading `state/` can
+    see what each answer is about; nothing reads it back. Empty in files written before
+    it was added, until the comment is next seen."""
 
     def as_json(self) -> dict[str, Any]:
         return {
+            # First, because it is what a person opening the file is looking for.
+            "text": self.text,
             "answers": self.answers,
             "model": self.model,
             "classified_at": self.classified_at,
@@ -91,6 +97,7 @@ class StoredAnswers:
             answers=dict(payload.get("answers") or {}),
             model=str(payload.get("model") or "unknown"),
             classified_at=str(payload.get("classified_at") or ""),
+            text=_text(payload.get("text")),
         )
 
 
@@ -128,8 +135,10 @@ class ThreadStore:
         comment_uuid: str,
         answers: dict[str, Any],
         model: str,
+        *,
+        text: str = "",
     ) -> None:
-        """Record one comment's answers, if it has any.
+        """Record one comment's answers, and the text they were given for, if any.
 
         An empty answer dict means the call failed; storing it would cache the failure
         and the comment would never be retried.
@@ -140,7 +149,17 @@ class ThreadStore:
             answers=answers,
             model=model,
             classified_at=_timestamp(),
+            text=text,
         )
+
+    def fill_text(self, comment_uuid: str, text: str) -> None:
+        """Add the comment text to an entry stored before the text was recorded.
+
+        Never overwrites: the stored text is the text that was classified.
+        """
+        record = self.classified.get(comment_uuid)
+        if record is not None and not record.text and text:
+            self.classified[comment_uuid] = replace(record, text=text)
 
     def describe(self, *, url: str, headline: str) -> None:
         """Record which article this is, for whoever opens the file."""

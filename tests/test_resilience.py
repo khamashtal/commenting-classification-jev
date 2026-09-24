@@ -248,6 +248,7 @@ class TestPerCommentModel:
         )
         for comment in comments:
             assert store.get(comment.uuid).model == "jev-1.13.0"
+            assert store.get(comment.uuid).text == comment.text
 
 
 class TestLockOwnership:

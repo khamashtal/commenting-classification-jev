@@ -154,6 +154,14 @@ class TestLifecycle:
         assert large > small
         assert large == pytest.approx(1000, rel=0.2)
 
+    def test_token_estimate_accepts_the_real_battery(self) -> None:
+        """The SDK's question types changed from msgspec to pydantic in 0.7, and every
+        request then failed locally. FakeJev never reaches this method, so only the
+        real battery here catches that."""
+        from processing.questions import BATTERY
+
+        assert JevClient._estimate_tokens({"a": "x"}, BATTERY) > 0
+
     def test_connection_pool_is_bounded_to_the_semaphore(self) -> None:
         """Unbounded httpx connections would defeat the concurrency bound."""
         client = JevClient("key", concurrency=8)

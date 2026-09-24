@@ -243,7 +243,12 @@ async def _classify_one(
     # moment it arrives, so it must be recorded the moment it arrives. Batching this at
     # the end meant a Ctrl-C partway through discarded everything bought so far.
     if store is not None:
-        store.remember(record.comment.uuid, answers, response.model)
+        store.remember(
+            record.comment.uuid,
+            answers,
+            response.model,
+            text=record.comment.text,
+        )
 
 
 # ----------------------------------------------------------------- verdict and ranking
@@ -339,7 +344,12 @@ def battery_fingerprint(article_max_words: int) -> str:
     material = msgspec.json.encode(
         {
             "questions": sorted(BATTERY),
-            "battery": msgspec.json.encode(BATTERY).decode(),
+            # The SDK's question types are pydantic models (since typesafe-sdk 0.7),
+            # which msgspec cannot encode directly.
+            "battery": {
+                qid: question.model_dump(mode="json")
+                for qid, question in sorted(BATTERY.items())
+            },
             "article_max_words": article_max_words,
         },
     )
@@ -441,6 +451,8 @@ async def classify_thread(
             # empty is a trap for whatever reads it next.
             record.model = remembered.model
             restored_models.add(remembered.model)
+            # Entries written before the text was stored get it now, at no cost.
+            store.fill_text(record.comment.uuid, record.comment.text)
             reused += 1
         else:
             to_classify.append(record)

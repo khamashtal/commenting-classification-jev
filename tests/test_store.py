@@ -174,3 +174,29 @@ def test_timestamps_are_utc_with_an_explicit_offset(state_dir) -> None:
         # To the second: six decimal places hid the offset that matters.
         assert "." not in stamp, f"{stamp} still carries microseconds"
         assert abs((datetime.now(UTC) - parsed).total_seconds()) < 60
+
+
+def test_comment_text_is_stored_and_survives_a_round_trip(state_dir) -> None:
+    store = ThreadStore(container_uuid="container-1")
+    store.remember("c-1", {"tone": 1.8}, "jev-1.13.0", text="A reasoned point.")
+    save_store(store, state_dir)
+
+    raw = json.loads(store_path("container-1", state_dir).read_text(encoding="utf-8"))
+    assert raw["classified"]["c-1"]["text"] == "A reasoned point."
+    assert load_store("container-1", state_dir).get("c-1").text == "A reasoned point."
+
+
+def test_entry_without_text_loads_and_is_filled_in_but_never_overwritten(
+    state_dir,
+) -> None:
+    """Files written before the text was stored must still load, and gain it later."""
+    store = ThreadStore(container_uuid="container-1")
+    store.remember("c-1", {"tone": 1.0}, "jev-1.13.0")
+    save_store(store, state_dir)
+
+    reloaded = load_store("container-1", state_dir)
+    assert reloaded.get("c-1").text == ""
+    reloaded.fill_text("c-1", "The original text.")
+    reloaded.fill_text("c-1", "Something else.")
+    assert reloaded.get("c-1").text == "The original text."
+    assert reloaded.get("c-1").answers == {"tone": 1.0}
